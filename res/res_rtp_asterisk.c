@@ -91,6 +91,8 @@ ASTERISK_FILE_VERSION(__FILE__, "$Revision$")
 #define RTCP_PT_SDES    202
 #define RTCP_PT_BYE     203
 #define RTCP_PT_APP     204
+/* VP8: RTCP Feedback */
+#define RTCP_PT_PSFB    206
 
 #define RTP_MTU		1200
 
@@ -341,6 +343,9 @@ struct ast_rtcp {
 	double normdevrtt;
 	double stdevrtt;
 	unsigned int rtt_count;
+
+	/* VP8: sequence number for the RTCP FIR FCI */
+	int firseq;
 };
 
 struct rtp_red {
@@ -2599,6 +2604,41 @@ static int ast_rtp_write(struct ast_rtp_instance *instance, struct ast_frame *fr
 		return 0;
 	}
 
+	/* VP8: is this a request to send a RTCP FIR? */
+	if(frame->frametype == AST_FRAME_CONTROL && frame->subclass.integer == AST_CONTROL_VIDUPDATE) {
+		ast_log(LOG_WARNING, "res_rtp_asterisk, requested to send a RTCP FIR packet to the peer\n");
+		struct ast_rtp *rtp = ast_rtp_instance_get_data(instance);
+		if (!rtp || !rtp->rtcp)
+			return 0;
+		unsigned int *rtcpheader;
+		char bdata[1024];
+		if (ast_sockaddr_isnull(&rtp->rtcp->them)) {
+			/*
+			 * RTCP was stopped.
+			 */
+			return 0;
+		}
+		/* Prepare RTCP FIR (PT=206, FMT=4) */
+		rtp->rtcp->firseq++;
+		if(rtp->rtcp->firseq == 256)
+			rtp->rtcp->firseq = 0;
+		int len = 20;
+		int ice;
+		rtcpheader = (unsigned int *)bdata;
+		rtcpheader[0] = htonl((2 << 30) | (4 << 24) | (RTCP_PT_PSFB << 16) | ((len/4)-1));
+		rtcpheader[1] = htonl(rtp->ssrc);
+		rtcpheader[2] = htonl(rtp->themssrc);
+		rtcpheader[3] = htonl(rtp->themssrc);	/* FCI: SSRC */
+		rtcpheader[4] = htonl(rtp->rtcp->firseq << 24);			/* FCI: Sequence number */
+		int res = rtcp_sendto(instance, (unsigned int *)rtcpheader, len, 0, &rtp->rtcp->them, &ice);
+		if (res < 0) {
+			ast_log(LOG_ERROR, "RTCP FIR transmission error: %s\n",strerror(errno));
+			return 0;
+		}
+		ast_log(LOG_WARNING, " >> RTCP FIR packet sent to the peer!\n");
+		return 0;
+	}
+
 	/* If there is no data length we can't very well send the packet */
 	if (!frame->datalen) {
 		ast_debug(1, "Received frame with no data for RTP instance '%p' so dropping frame\n", instance);
@@ -2650,6 +2690,8 @@ static int ast_rtp_write(struct ast_rtp_instance *instance, struct ast_frame *fr
 		case AST_FORMAT_SIREN7:
 		case AST_FORMAT_SIREN14:
 		case AST_FORMAT_G719:
+		/* Opus */
+		case AST_FORMAT_OPUS:
 			/* these are all frame-based codecs and cannot be safely run through
 			   a smoother */
 			break;

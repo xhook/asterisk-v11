@@ -7752,8 +7752,25 @@ static int sip_indicate(struct ast_channel *ast, int condition, const void *data
 		break;
 	case AST_CONTROL_VIDUPDATE:	/* Request a video frame update */
 		if (p->vrtp && !p->novideo) {
-			transmit_info_with_vidupdate(p);
-			/* ast_rtcp_send_h261fur(p->vrtp); */
+			/* Only use this for WebRTC users */
+			struct ast_format_cap *fcap = ast_channel_nativeformats(ast);
+			struct ast_format vp8;
+			ast_format_set(&vp8, AST_FORMAT_VP8, 0);
+			if(ast_format_cap_iscompatible(fcap, &vp8)) {
+				sip_pvt_lock(p);
+				if (p->vrtp) {
+					ast_log(LOG_WARNING, "chan_sip, sending RTCP FIR to WebRTC user\n");
+					/* FIXME Fake RTP write, this will be sent as an RTCP packet */
+					struct ast_frame fr;
+					fr.frametype = AST_FRAME_CONTROL;
+					fr.subclass.integer = AST_CONTROL_VIDUPDATE;
+					res = ast_rtp_instance_write(p->vrtp, &fr);
+				}
+				sip_pvt_unlock(p);
+			} else {
+				transmit_info_with_vidupdate(p);
+				/* ast_rtcp_send_h261fur(p->vrtp); */
+			}
 		} else
 			res = -1;
 		break;
@@ -11019,7 +11036,7 @@ static int process_sdp_a_audio(const char *a, struct sip_pvt *p, struct ast_rtp_
 		struct ast_format *format;
 
 		if ((format = ast_rtp_codecs_get_payload_format(newaudiortp, codec))) {
-			unsigned int bit_rate;
+			unsigned int bit_rate, value;
 
 			if (!ast_format_sdp_parse(format, fmtp_string)) {
 				found = TRUE;
@@ -11058,6 +11075,53 @@ static int process_sdp_a_audio(const char *a, struct sip_pvt *p, struct ast_rtp_
 					}
 				}
 				break;
+			/* Opus SDP fmtp parameters (draft-ietf-payload-rtp-opus-00) */
+			case AST_FORMAT_OPUS:
+				if (sscanf(fmtp_string, "maxplaybackrate=%30u", &value) == 1) {
+					ast_log(LOG_WARNING, "Got Opus maxplaybackrate=%d\n", value);
+					/* TODO: actually handle this */
+					found = TRUE;
+				}
+				if (sscanf(fmtp_string, "sprop-maxcapturerate=%30u", &value) == 1) {
+					ast_log(LOG_WARNING, "Got Opus sprop-maxcapturerate=%d\n", value);
+					/* TODO: actually handle this */
+					found = TRUE;
+				}
+				if (sscanf(fmtp_string, "minptime=%30u", &value) == 1) {
+					ast_log(LOG_WARNING, "Got Opus minptime=%d\n", value);
+					/* TODO: actually handle this */
+					found = TRUE;
+				}
+				if (sscanf(fmtp_string, "maxaveragebitrate=%30u", &value) == 1) {
+					ast_log(LOG_WARNING, "Got Opus maxaveragebitrate=%d\n", value);
+					/* TODO: actually handle this */
+					found = TRUE;
+				}
+				if (sscanf(fmtp_string, "stereo=%30u", &value) == 1) {
+					ast_log(LOG_WARNING, "Got Opus stereo=%d\n", value);
+					/* TODO: actually handle this */
+					found = TRUE;
+				}
+				if (sscanf(fmtp_string, "sprop-stereo=%30u", &value) == 1) {
+					ast_log(LOG_WARNING, "Got Opus sprop-stereo=%d\n", value);
+					/* TODO: actually handle this */
+					found = TRUE;
+				}
+				if (sscanf(fmtp_string, "cbr=%30u", &value) == 1) {
+					ast_log(LOG_WARNING, "Got Opus cbr=%d\n", value);
+					/* TODO: actually handle this */
+					found = TRUE;
+				}
+				if (sscanf(fmtp_string, "useinbandfec=%30u", &value) == 1) {
+					ast_log(LOG_WARNING, "Got Opus useinbandfec=%d\n", value);
+					/* TODO: actually handle this */
+					found = TRUE;
+				}
+				if (sscanf(fmtp_string, "usedtx=%30u", &value) == 1) {
+					ast_log(LOG_WARNING, "Got Opus usedtx=%d\n", value);
+					/* TODO: actually handle this */
+					found = TRUE;
+				}
 			}
 		}
 	}
@@ -11078,7 +11142,9 @@ static int process_sdp_a_video(const char *a, struct sip_pvt *p, struct ast_rtp_
 		/* We have a rtpmap to handle */
 		if (*last_rtpmap_codec < SDP_MAX_RTPMAP_CODECS) {
 			/* Note: should really look at the '#chans' params too */
-			if (!strncasecmp(mimeSubtype, "H26", 3) || !strncasecmp(mimeSubtype, "MP4", 3)) {
+			if (!strncasecmp(mimeSubtype, "H26", 3) || !strncasecmp(mimeSubtype, "MP4", 3)
+					/* VP8 */
+					|| !strncasecmp(mimeSubtype, "VP8", 3)) {
 				if (!(ast_rtp_codecs_payloads_set_rtpmap_type_rate(newvideortp, NULL, codec, "video", mimeSubtype, 0, sample_rate))) {
 					if (debug)
 						ast_verbose("Found video description format %s for ID %d\n", mimeSubtype, codec);
@@ -12635,7 +12701,11 @@ static void add_codec_to_sdp(const struct sip_pvt *p,
 	} else /* I don't see how you couldn't have p->rtp, but good to check for and error out if not there like earlier code */
 		return;
 	ast_str_append(m_buf, 0, " %d", rtp_code);
-	ast_str_append(a_buf, 0, "a=rtpmap:%d %s/%d\r\n", rtp_code, mime, rate);
+	/* Opus mandates 2 channels in rtpmap */
+	if((int) format->id == AST_FORMAT_OPUS)
+		ast_str_append(a_buf, 0, "a=rtpmap:%d %s/%d/2\r\n", rtp_code, mime, rate);
+	else
+		ast_str_append(a_buf, 0, "a=rtpmap:%d %s/%d\r\n", rtp_code, mime, rate);
 
 	ast_format_sdp_generate(format, rtp_code, a_buf);
 
@@ -12663,6 +12733,17 @@ static void add_codec_to_sdp(const struct sip_pvt *p,
 	case AST_FORMAT_G719:
 		/* Indicate that we only expect 64Kbps */
 		ast_str_append(a_buf, 0, "a=fmtp:%d bitrate=64000\r\n", rtp_code);
+		break;
+	/* Opus, pass parameters we care about (FIXME could this be 'fb' and not 'wb'?) */
+	case AST_FORMAT_OPUS:
+		ast_str_append(a_buf, 0, "a=maxptime:%d\r\n", 60);	/* FIXME */
+		ast_str_append(a_buf, 0, "a=fmtp:%d maxplaybackrate=%d; stereo=%d; sprop-stereo=%d; useinbandfec=%d\r\n",
+				rtp_code,
+				16000,	/* maxplaybackrate */
+				0,		/* stereo */
+				0,		/* sprop-stereo */
+				0		/* useinbandfec FIXME */
+		);
 		break;
 	}
 

@@ -1002,6 +1002,40 @@ static int speex_samples(unsigned char *data, int len)
 	return cnt;
 }
 
+/* Opus: copied from opus_decoder.c */
+static int opus_samples(unsigned char *data, int len) {
+	/* Do opus_packet_get_nb_frames first */
+	int count, frames;
+	if (len<1) {
+		return 0;	/* FIXME OPUS_BAD_ARG */
+	} else {
+		count = data[0]&0x3;
+		if (count==0)
+			frames = 1;
+		else if (count!=3)
+			frames = 2;
+		else if (len<2)
+			return 0;	/* FIXME OPUS_INVALID_PACKET */
+		else
+			frames = data[1]&0x3F;
+	}
+	/* The, do a opus_packet_get_samples_per_frame */
+   int audiosize, Fs = 48000;
+   if (data[0]&0x80) {
+      audiosize = ((data[0]>>3)&0x3);
+      audiosize = (Fs<<audiosize)/400;
+   } else if ((data[0]&0x60) == 0x60) {
+      audiosize = (data[0]&0x08) ? Fs/50 : Fs/100;
+   } else {
+      audiosize = ((data[0]>>3)&0x3);
+      if (audiosize == 3)
+         audiosize = Fs*60/1000;
+      else
+         audiosize = (Fs<<audiosize)/100;
+   }
+   return frames*audiosize;
+}
+
 int ast_codec_get_samples(struct ast_frame *f)
 {
 	int samples = 0;
@@ -1082,6 +1116,10 @@ int ast_codec_get_samples(struct ast_frame *f)
 	case AST_FORMAT_CELT:
 		/* TODO The assumes 20ms delivery right now, which is incorrect */
 		samples = ast_format_rate(&f->subclass.format) / 50;
+		break;
+	/* Opus */
+	case AST_FORMAT_OPUS:
+		samples = opus_samples(f->data.ptr, f->datalen);
 		break;
 	default:
 		ast_log(LOG_WARNING, "Unable to calculate samples for format %s\n", ast_getformatname(&f->subclass.format));

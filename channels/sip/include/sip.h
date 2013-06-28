@@ -503,7 +503,6 @@ enum check_auth_result {
 	AUTH_SECRET_FAILED = -1,
 	AUTH_USERNAME_MISMATCH = -2,
 	AUTH_NOT_FOUND = -3,	/*!< returned by register_verify */
-	AUTH_FAKE_AUTH = -4,
 	AUTH_UNKNOWN_DOMAIN = -5,
 	AUTH_PEER_NOT_DYNAMIC = -6,
 	AUTH_ACL_FAILED = -7,
@@ -964,7 +963,6 @@ struct sip_st_dlg {
 	int st_interval;                   /*!< Session-Timers negotiated session refresh interval */
 	enum st_refresher st_ref;          /*!< Session-Timers cached refresher */
 	int st_schedid;                    /*!< Session-Timers ast_sched scheduler id */
-	int st_expirys;                    /*!< Session-Timers number of expirys */
 	int st_active_peer_ua;             /*!< Session-Timers on/off in peer UA */
 	int st_cached_min_se;              /*!< Session-Timers cached Min-SE */
 	int st_cached_max_se;              /*!< Session-Timers cached Session-Expires */
@@ -1917,7 +1915,15 @@ struct sip_peer *sip_find_peer(const char *peer, struct ast_sockaddr *addr, int 
 void sip_auth_headers(enum sip_auth_type code, char **header, char **respheader);
 const char *sip_get_header(const struct sip_request *req, const char *name);
 const char *sip_get_transport(enum sip_transport t);
-void *sip_unref_peer(struct sip_peer *peer, char *tag);
+
+#ifdef REF_DEBUG
+#define sip_ref_peer(arg1,arg2) _ref_peer((arg1),(arg2), __FILE__, __LINE__, __PRETTY_FUNCTION__)
+#define sip_unref_peer(arg1,arg2) _unref_peer((arg1),(arg2), __FILE__, __LINE__, __PRETTY_FUNCTION__)
+struct sip_peer *_ref_peer(struct sip_peer *peer, char *tag, char *file, int line, const char *func);
+void *_unref_peer(struct sip_peer *peer, char *tag, char *file, int line, const char *func);
+#else
 struct sip_peer *sip_ref_peer(struct sip_peer *peer, char *tag);
+void *sip_unref_peer(struct sip_peer *peer, char *tag);
+#endif /* REF_DEBUG */
 
 #endif

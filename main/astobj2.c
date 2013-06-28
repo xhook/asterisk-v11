@@ -150,10 +150,12 @@ static inline struct astobj2 *INTERNAL_OBJ(void *user_data)
 	p = (struct astobj2 *) ((char *) user_data - sizeof(*p));
 	if (AO2_MAGIC != p->priv_data.magic) {
 		if (p->priv_data.magic) {
-			ast_log(LOG_ERROR, "bad magic number 0x%x for %p\n", p->priv_data.magic, p);
+			ast_log(LOG_ERROR, "bad magic number 0x%x for object %p\n",
+				p->priv_data.magic, user_data);
 		} else {
 			ast_log(LOG_ERROR,
-				"bad magic number for %p. Object is likely destroyed.\n", p);
+				"bad magic number for object %p. Object is likely destroyed.\n",
+				user_data);
 		}
 		return NULL;
 	}
@@ -654,7 +656,11 @@ void __ao2_global_obj_release(struct ao2_global_obj *holder, const char *tag, co
 
 	/* Release the held ao2 object. */
 	if (holder->obj) {
-		__ao2_ref_debug(holder->obj, -1, tag, file, line, func);
+		if (tag) {
+			__ao2_ref_debug(holder->obj, -1, tag, file, line, func);
+		} else {
+			__ao2_ref(holder->obj, -1);
+		}
 		holder->obj = NULL;
 	}
 
@@ -676,7 +682,11 @@ void *__ao2_global_obj_replace(struct ao2_global_obj *holder, void *obj, const c
 	}
 
 	if (obj) {
-		__ao2_ref_debug(obj, +1, tag, file, line, func);
+		if (tag) {
+			__ao2_ref_debug(obj, +1, tag, file, line, func);
+		} else {
+			__ao2_ref(obj, +1);
+		}
 	}
 	obj_old = holder->obj;
 	holder->obj = obj;
@@ -692,7 +702,11 @@ int __ao2_global_obj_replace_unref(struct ao2_global_obj *holder, void *obj, con
 
 	obj_old = __ao2_global_obj_replace(holder, obj, tag, file, line, func, name);
 	if (obj_old) {
-		__ao2_ref_debug(obj_old, -1, tag, file, line, func);
+		if (tag) {
+			__ao2_ref_debug(obj_old, -1, tag, file, line, func);
+		} else {
+			__ao2_ref(obj_old, -1);
+		}
 		return 1;
 	}
 	return 0;
@@ -715,7 +729,11 @@ void *__ao2_global_obj_ref(struct ao2_global_obj *holder, const char *tag, const
 
 	obj = holder->obj;
 	if (obj) {
-		__ao2_ref_debug(obj, +1, tag, file, line, func);
+		if (tag) {
+			__ao2_ref_debug(obj, +1, tag, file, line, func);
+		} else {
+			__ao2_ref(obj, +1);
+		}
 	}
 
 	__ast_rwlock_unlock(file, line, func, &holder->lock, name);

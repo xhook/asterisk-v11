@@ -55,7 +55,7 @@ ASTERISK_FILE_VERSION(__FILE__, "$Revision$")
 #include "asterisk/config_options.h"
 
 /*** DOCUMENTATION
-	<application name="JabberSend" language="en_US">
+	<application name="JabberSend" language="en_US" module="res_xmpp">
 		<synopsis>
 			Sends an XMPP message to a buddy.
 		</synopsis>
@@ -81,11 +81,11 @@ ASTERISK_FILE_VERSION(__FILE__, "$Revision$")
 			<replaceable>asterisk</replaceable>, configured in xmpp.conf.</para>
 		</description>
 		<see-also>
-			<ref type="function">JABBER_STATUS</ref>
-			<ref type="function">JABBER_RECEIVE</ref>
+			<ref type="function" module="res_xmpp">JABBER_STATUS</ref>
+			<ref type="function" module="res_xmpp">JABBER_RECEIVE</ref>
 		</see-also>
 	</application>
-	<function name="JABBER_RECEIVE" language="en_US">
+	<function name="JABBER_RECEIVE" language="en_US" module="res_xmpp">
 		<synopsis>
 			Reads XMPP messages.
 		</synopsis>
@@ -110,11 +110,11 @@ ASTERISK_FILE_VERSION(__FILE__, "$Revision$")
 			the <replaceable>asterisk</replaceable> XMPP account configured in xmpp.conf.</para>
 		</description>
 		<see-also>
-			<ref type="function">JABBER_STATUS</ref>
-			<ref type="application">JabberSend</ref>
+			<ref type="function" module="res_xmpp">JABBER_STATUS</ref>
+			<ref type="application" module="res_xmpp">JabberSend</ref>
 		</see-also>
 	</function>
-	<function name="JABBER_STATUS" language="en_US">
+	<function name="JABBER_STATUS" language="en_US" module="res_xmpp">
 		<synopsis>
 			Retrieves a buddy's status.
 		</synopsis>
@@ -140,11 +140,11 @@ ASTERISK_FILE_VERSION(__FILE__, "$Revision$")
 			the associated XMPP account configured in xmpp.conf.</para>
 		</description>
 		<see-also>
-			<ref type="function">JABBER_RECEIVE</ref>
-			<ref type="application">JabberSend</ref>
+			<ref type="function" module="res_xmpp">JABBER_RECEIVE</ref>
+			<ref type="application" module="res_xmpp">JabberSend</ref>
 		</see-also>
 	</function>
-	<application name="JabberSendGroup" language="en_US">
+	<application name="JabberSendGroup" language="en_US" module="res_xmpp">
 		<synopsis>
 			Send a Jabber Message to a specified chat room
 		</synopsis>
@@ -167,7 +167,7 @@ ASTERISK_FILE_VERSION(__FILE__, "$Revision$")
 			<note><para>To be able to send messages to a chat room, a user must have previously joined it. Use the <replaceable>JabberJoin</replaceable> function to do so.</para></note>
 		</description>
 	</application>
-	<application name="JabberJoin" language="en_US">
+	<application name="JabberJoin" language="en_US" module="res_xmpp">
 		<synopsis>
 			Join a chat room
 		</synopsis>
@@ -187,7 +187,7 @@ ASTERISK_FILE_VERSION(__FILE__, "$Revision$")
 			<para>Allows Asterisk to join a chat room.</para>
 		</description>
 	</application>
-	<application name="JabberLeave" language="en_US">
+	<application name="JabberLeave" language="en_US" module="res_xmpp">
 		<synopsis>
 			Leave a chat room
 		</synopsis>
@@ -206,7 +206,7 @@ ASTERISK_FILE_VERSION(__FILE__, "$Revision$")
 			<para>Allows Asterisk to leave a chat room.</para>
 		</description>
 	</application>
-	<application name="JabberStatus" language="en_US">
+	<application name="JabberStatus" language="en_US" module="res_xmpp">
 		<synopsis>
 			Retrieve the status of a jabber list member
 		</synopsis>
@@ -250,7 +250,7 @@ ASTERISK_FILE_VERSION(__FILE__, "$Revision$")
 			</enumlist>
 		</description>
 	</application>
-	<manager name="JabberSend" language="en_US">
+	<manager name="JabberSend" language="en_US" module="res_xmpp">
 		<synopsis>
 			Sends a message to a Jabber Client.
 		</synopsis>
@@ -430,6 +430,10 @@ static void xmpp_client_destructor(void *obj)
 	struct ast_xmpp_message *message;
 
 	ast_xmpp_client_disconnect(client);
+
+	if (client->filter) {
+		iks_filter_delete(client->filter);
+	}
 
 	if (client->stack) {
 		iks_stack_delete(client->stack);
@@ -696,10 +700,10 @@ static int xmpp_resource_hash(const void *obj, const int flags)
 /*! \brief Comparator function for XMPP resource */
 static int xmpp_resource_cmp(void *obj, void *arg, int flags)
 {
-	struct ast_xmpp_resource *resource1 = obj, *resource2 = arg;
+	struct ast_xmpp_resource *resource1 = obj;
 	const char *resource = arg;
 
-	return !strcmp(resource1->resource, flags & OBJ_KEY ? resource : resource2->resource) ? CMP_MATCH | CMP_STOP : 0;
+	return !strcmp(resource1->resource, resource) ? CMP_MATCH | CMP_STOP : 0;
 }
 
 /*! \brief Destructor callback function for XMPP buddy */
@@ -1079,8 +1083,6 @@ static void xmpp_pubsub_delete_node(struct ast_xmpp_client *client, const char *
 	iks_insert_attrib(delete, "node", node_name);
 	ast_xmpp_client_send(client, request);
 
-	iks_delete(delete);
-	iks_delete(pubsub);
 	iks_delete(request);
 }
 
@@ -1326,14 +1328,15 @@ static int xmpp_pubsub_handle_event(void *data, ikspak *pak)
 		return IKS_FILTER_EAT;
 	}
 	if (!strcasecmp(iks_name(item_content), "state")) {
-		device_state = iks_find_cdata(item, "state");
-		if ((cachable_str = iks_find_cdata(item, "cachable"))) {
+		if ((cachable_str = iks_find_attrib(item_content, "cachable"))) {
 			sscanf(cachable_str, "%30d", &cachable);
 		}
+		device_state = iks_find_cdata(item, "state");
 		if (!(event = ast_event_new(AST_EVENT_DEVICE_STATE_CHANGE,
 					    AST_EVENT_IE_DEVICE, AST_EVENT_IE_PLTYPE_STR, item_id, AST_EVENT_IE_STATE,
 					    AST_EVENT_IE_PLTYPE_UINT, ast_devstate_val(device_state), AST_EVENT_IE_EID,
 					    AST_EVENT_IE_PLTYPE_RAW, &pubsub_eid, sizeof(pubsub_eid),
+					    AST_EVENT_IE_CACHABLE, AST_EVENT_IE_PLTYPE_UINT, cachable,
 					    AST_EVENT_IE_END))) {
 			return IKS_FILTER_EAT;
 		}
@@ -1543,7 +1546,7 @@ static int xmpp_status_exec(struct ast_channel *chan, const char *data)
 		return -1;
 	}
 
-	if (ast_strlen_zero(jid.resource) || !(resource = ao2_find(buddy->resources, jid.resource, OBJ_KEY))) {
+	if (ast_strlen_zero(jid.resource) || !(resource = ao2_callback(buddy->resources, 0, xmpp_resource_cmp, jid.resource))) {
 		resource = ao2_callback(buddy->resources, OBJ_NODATA, xmpp_resource_immediate, NULL);
 	}
 
@@ -1614,7 +1617,7 @@ static int acf_jabberstatus_read(struct ast_channel *chan, const char *name, cha
 		return -1;
 	}
 
-	if (ast_strlen_zero(jid.resource) || !(resource = ao2_find(buddy->resources, jid.resource, OBJ_KEY))) {
+	if (ast_strlen_zero(jid.resource) || !(resource = ao2_callback(buddy->resources, 0, xmpp_resource_cmp, jid.resource))) {
 		resource = ao2_callback(buddy->resources, OBJ_NODATA, xmpp_resource_immediate, NULL);
 	}
 
@@ -2342,7 +2345,7 @@ static int xmpp_client_service_discovery_result_hook(void *data, ikspak *pak)
 		return IKS_FILTER_EAT;
 	}
 
-	if (!(resource = ao2_find(buddy->resources, pak->from->resource, OBJ_KEY))) {
+	if (!(resource = ao2_callback(buddy->resources, 0, xmpp_resource_cmp, pak->from->resource))) {
 		ao2_ref(buddy, -1);
 		return IKS_FILTER_EAT;
 	}
@@ -3135,7 +3138,7 @@ static int xmpp_pak_presence(struct ast_xmpp_client *client, struct ast_xmpp_cli
 
 	ao2_lock(buddy->resources);
 
-	if (!(resource = ao2_find(buddy->resources, pak->from->resource, OBJ_KEY | OBJ_NOLOCK))) {
+	if (!(resource = ao2_callback(buddy->resources, OBJ_NOLOCK, xmpp_resource_cmp, pak->from->resource))) {
 		/* Only create the new resource if it is not going away - in reality this should not happen */
 		if (status != STATUS_DISAPPEAR) {
 			if (!(resource = ao2_alloc(sizeof(*resource), xmpp_resource_destructor))) {
@@ -3394,12 +3397,6 @@ int ast_xmpp_client_disconnect(struct ast_xmpp_client *client)
 		iks_disconnect(client->parser);
 	}
 
-	/* Disconnecting the parser and going back to a disconnected state means any hooks should no longer be present */
-	if (client->filter) {
-		iks_filter_delete(client->filter);
-		client->filter = NULL;
-	}
-
 	client->state = XMPP_STATE_DISCONNECTED;
 
 	return 0;
@@ -3640,8 +3637,8 @@ static int xmpp_client_config_post_apply(void *obj, void *arg, int flags)
 			cfg->client->jid = iks_id_new(cfg->client->stack, cfg->user);
 		}
 
-		if (!cfg->client->jid) {
-			ast_log(LOG_ERROR, "Jabber identity could not be created for client '%s' - client not active\n", cfg->name);
+		if (!cfg->client->jid || ast_strlen_zero(cfg->client->jid->user)) {
+			ast_log(LOG_ERROR, "Jabber identity '%s' could not be created for client '%s' - client not active\n", cfg->user, cfg->name);
 			return -1;
 		}
 

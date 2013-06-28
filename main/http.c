@@ -229,7 +229,7 @@ static int static_callback(struct ast_tcptls_session_instance *ser,
 		goto out403;
 	}
 
-	/* Disallow any funny filenames at all */
+	/* Disallow any funny filenames at all (checking first character only??) */
 	if ((uri[0] < 33) || strchr("./|~@#$%^&*() \t", uri[0])) {
 		goto out403;
 	}
@@ -244,6 +244,7 @@ static int static_callback(struct ast_tcptls_session_instance *ser,
 
 	if (!(mtype = ast_http_ftype2mtype(ftype))) {
 		snprintf(wkspace, sizeof(wkspace), "text/%s", S_OR(ftype, "plain"));
+		mtype = wkspace;
 	}
 
 	/* Cap maximum length */
@@ -261,12 +262,12 @@ static int static_callback(struct ast_tcptls_session_instance *ser,
 		goto out404;
 	}
 
-	fd = open(path, O_RDONLY);
-	if (fd < 0) {
+	if (strstr(path, "/private/") && !astman_is_authed(ast_http_manid_from_vars(headers))) {
 		goto out403;
 	}
 
-	if (strstr(path, "/private/") && !astman_is_authed(ast_http_manid_from_vars(headers))) {
+	fd = open(path, O_RDONLY);
+	if (fd < 0) {
 		goto out403;
 	}
 
@@ -289,6 +290,7 @@ static int static_callback(struct ast_tcptls_session_instance *ser,
 	}
 
 	if ( (http_header = ast_str_create(255)) == NULL) {
+		close(fd);
 		return -1;
 	}
 
@@ -593,6 +595,8 @@ void ast_http_uri_unlink_all_with_key(const char *key)
 	AST_RWLIST_UNLOCK(&uris);
 }
 
+#define MAX_POST_CONTENT 1025
+
 /*
  * get post variables from client Request Entity-Body, if content type is
  * application/x-www-form-urlencoded
@@ -622,6 +626,13 @@ struct ast_variable *ast_http_get_post_vars(
 	}
 
 	if (content_length <= 0) {
+		return NULL;
+	}
+
+	if (content_length > MAX_POST_CONTENT - 1) {
+		ast_log(LOG_WARNING, "Excessively long HTTP content. %d is greater than our max of %d\n",
+				content_length, MAX_POST_CONTENT);
+		ast_http_send(ser, AST_HTTP_POST, 413, "Request Entity Too Large", NULL, NULL, 0, 0);
 		return NULL;
 	}
 
@@ -1013,7 +1024,7 @@ static int __ast_http_load(int reload)
 	struct http_uri_redirect *redirect;
 	struct ast_flags config_flags = { reload ? CONFIG_FLAG_FILEUNCHANGED : 0 };
 	uint32_t bindport = DEFAULT_PORT;
-	struct ast_sockaddr *addrs = NULL;
+	RAII_VAR(struct ast_sockaddr *, addrs, NULL, ast_free);
 	int num_addrs = 0;
 	int http_tls_was_enabled = 0;
 
@@ -1052,8 +1063,17 @@ static int __ast_http_load(int reload)
 		v = ast_variable_browse(cfg, "general");
 		for (; v; v = v->next) {
 
-			/* handle tls conf */
-			if (!ast_tls_read_conf(&http_tls_cfg, &https_desc, v->name, v->value)) {
+			/* read tls config options while preventing unsupported options from being set */
+			if (strcasecmp(v->name, "tlscafile")
+				&& strcasecmp(v->name, "tlscapath")
+				&& strcasecmp(v->name, "tlscadir")
+				&& strcasecmp(v->name, "tlsverifyclient")
+				&& strcasecmp(v->name, "tlsdontverifyserver")
+				&& strcasecmp(v->name, "tlsclientmethod")
+				&& strcasecmp(v->name, "sslclientmethod")
+				&& strcasecmp(v->name, "tlscipher")
+				&& strcasecmp(v->name, "sslcipher")
+				&& !ast_tls_read_conf(&http_tls_cfg, &https_desc, v->name, v->value)) {
 				continue;
 			}
 

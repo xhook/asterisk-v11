@@ -3023,7 +3023,13 @@ static int builtin_atxfer(struct ast_channel *chan, struct ast_channel *peer, st
 		ast_party_connected_line_free(&connected_line);
 		return -1;
 	}
-	ast_explicit_goto(xferchan, ast_channel_context(transferee), ast_channel_exten(transferee), ast_channel_priority(transferee));
+
+	dash = strrchr(xferto, '@');
+	if (dash) {
+		/* Trim off the context. */
+		*dash = '\0';
+	}
+	ast_explicit_goto(xferchan, transferer_real_context, xferto, 1);
 	ast_channel_state_set(xferchan, AST_STATE_UP);
 	ast_clear_flag(ast_channel_flags(xferchan), AST_FLAGS_ALL);
 
@@ -4246,9 +4252,12 @@ void ast_bridge_end_dtmf(struct ast_channel *chan, char digit, struct timeval st
 	long duration;
 
 	ast_channel_lock(chan);
-	dead = ast_test_flag(ast_channel_flags(chan), AST_FLAG_ZOMBIE) || ast_check_hangup(chan);
+	dead = ast_test_flag(ast_channel_flags(chan), AST_FLAG_ZOMBIE)
+		|| (ast_channel_softhangup_internal_flag(chan)
+			& ~(AST_SOFTHANGUP_ASYNCGOTO | AST_SOFTHANGUP_UNBRIDGE));
 	ast_channel_unlock(chan);
 	if (dead) {
+		/* Channel is a zombie or a real hangup. */
 		return;
 	}
 
@@ -4543,17 +4552,6 @@ int ast_bridge_call(struct ast_channel *chan, struct ast_channel *peer, struct a
 		if (!f || (f->frametype == AST_FRAME_CONTROL &&
 				(f->subclass.integer == AST_CONTROL_HANGUP || f->subclass.integer == AST_CONTROL_BUSY ||
 					f->subclass.integer == AST_CONTROL_CONGESTION))) {
-			/*
-			 * If the bridge was broken for a hangup that isn't real,
-			 * then don't run the h extension, because the channel isn't
-			 * really hung up. This should really only happen with AST_SOFTHANGUP_ASYNCGOTO,
-			 * but it doesn't hurt to check AST_SOFTHANGUP_UNBRIDGE either.
-			 */
-			ast_channel_lock(chan);
-			if (ast_channel_softhangup_internal_flag(chan) & (AST_SOFTHANGUP_ASYNCGOTO | AST_SOFTHANGUP_UNBRIDGE)) {
-				ast_set_flag(ast_channel_flags(chan), AST_FLAG_BRIDGE_HANGUP_DONT);
-			}
-			ast_channel_unlock(chan);
 			res = -1;
 			break;
 		}
@@ -4740,7 +4738,12 @@ before_you_go:
 		config->end_bridge_callback(config->end_bridge_callback_data);
 	}
 
-	if (!ast_test_flag(&config->features_caller, AST_FEATURE_NO_H_EXTEN)) {
+	/* run the hangup exten on the chan object IFF it was NOT involved in a parking situation
+	 * if it were, then chan belongs to a different thread now, and might have been hung up long
+	 * ago.
+	 */
+	if (!(ast_channel_softhangup_internal_flag(chan) & (AST_SOFTHANGUP_ASYNCGOTO | AST_SOFTHANGUP_UNBRIDGE))
+			&& !ast_test_flag(&config->features_caller, AST_FEATURE_NO_H_EXTEN)) {
 		struct ast_cdr *swapper = NULL;
 		char savelastapp[AST_MAX_EXTENSION];
 		char savelastdata[AST_MAX_EXTENSION];
@@ -5099,7 +5102,21 @@ static int manage_parked_call(struct parkeduser *pu, const struct pollfd *pfds, 
 				snprintf(parkingslot, sizeof(parkingslot), "%d", pu->parkingnum);
 				pbx_builtin_setvar_helper(chan, "PARKINGSLOT", parkingslot);
 				pbx_builtin_setvar_helper(chan, "PARKEDLOT", pu->parkinglot->name);
-				set_c_e_p(chan, pu->parkinglot->cfg.comebackcontext, peername_flat, 1);
+
+				/* Handle fallback when extensions don't exist here since that logic was removed from pbx */
+				if (ast_exists_extension(chan, pu->parkinglot->cfg.comebackcontext, peername_flat, 1, NULL)) {
+					set_c_e_p(chan, pu->parkinglot->cfg.comebackcontext, peername_flat, 1);
+				} else if (ast_exists_extension(chan, pu->parkinglot->cfg.comebackcontext, "s", 1, NULL)) {
+					ast_verb(2, "Can not start %s at %s,%s,1. Using 's@%s' instead.\n", ast_channel_name(chan),
+						pu->parkinglot->cfg.comebackcontext, peername_flat, pu->parkinglot->cfg.comebackcontext);
+					set_c_e_p(chan, pu->parkinglot->cfg.comebackcontext, "s", 1);
+				} else {
+					ast_verb(2, "Can not start %s at %s,%s,1 and exten 's@%s' does not exist. Using 's@default'\n",
+						ast_channel_name(chan),
+						pu->parkinglot->cfg.comebackcontext, peername_flat,
+						pu->parkinglot->cfg.comebackcontext);
+					set_c_e_p(chan, "default", "s", 1);
+				}
 			}
 		} else {
 			/*
@@ -7552,7 +7569,7 @@ static int manager_parkinglot_list(struct mansession *s, const struct message *m
 	return RESULT_SUCCESS;
 }
 
-/*! 
+/*!
  * \brief Dump parking lot status
  * \param s
  * \param m
@@ -8997,6 +9014,7 @@ static struct ast_custom_function featuremap_function = {
 /*! \internal \brief Clean up resources on Asterisk shutdown */
 static void features_shutdown(void)
 {
+	ast_cli_unregister_multiple(cli_features, ARRAY_LEN(cli_features));
 	ast_devstate_prov_del("Park");
 	ast_custom_function_unregister(&featuremap_function);
 	ast_custom_function_unregister(&feature_function);
@@ -9009,6 +9027,9 @@ static void features_shutdown(void)
 	ast_unregister_application(app_bridge);
 
 	pthread_cancel(parking_thread);
+	pthread_kill(parking_thread, SIGURG);
+	pthread_join(parking_thread, NULL);
+	ast_context_destroy(NULL, registrar);
 	ao2_ref(parkinglots, -1);
 }
 

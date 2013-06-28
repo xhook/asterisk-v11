@@ -4645,6 +4645,7 @@ static struct unistimsession *channel_to_session(struct ast_channel *ast)
 	ast_mutex_lock(&sub->parent->parent->lock);
 	if (!sub->parent->parent->session) {
 		ast_log(LOG_WARNING, "Unistim callback function called without a session\n");
+		ast_mutex_unlock(&sub->parent->parent->lock);
 		return NULL;
 	}
 	ast_mutex_unlock(&sub->parent->parent->lock);
@@ -4776,7 +4777,7 @@ static int unistim_hangup(struct ast_channel *ast)
 	struct unistim_line *l;
 	struct unistim_device *d;
 	struct unistimsession *s;
-	int i;
+	int i,end_call = 1;
 
 	s = channel_to_session(ast);
 	sub = ast_channel_tech_pvt(ast);
@@ -4821,10 +4822,8 @@ static int unistim_hangup(struct ast_channel *ast)
 		unistim_unalloc_sub(d, sub);
 		return 0;
 	}
-
 	if (sub->subtype == SUB_REAL) {
 		sub_stop_silence(s, sub);
-		send_end_call(s); /* Send end call packet only if ending active call, in other way sound should be loosed */
 	} else if (sub->subtype == SUB_RING) {
 		send_no_ring(s);
 		for (i = 0; i < FAVNUM; i++) {
@@ -4835,8 +4834,16 @@ static int unistim_hangup(struct ast_channel *ast)
 			if (is_key_line(d, i) && !strcmp(l->name, d->sline[i]->name)) {
 				send_favorite_short(i, FAV_LINE_ICON, s);
 				d->ssub[i] = NULL;
+				continue;
+			}
+			if (d->ssub[i] != NULL) { /* Found other subchannel active other then hangup'ed one */
+				ast_log(LOG_WARNING, "There is not only one call here %p %p %i\n",d->ssub[i], sub, i);
+				end_call = 0;
 			}
 		}
+	}
+	if (end_call) {
+		send_end_call(s); /* Send end call packet only if ending active call, in other way sound should be loosed */
 	}
 	sub->moh = 0;
 	if (sub->softkey >= 0) {
@@ -4849,7 +4856,7 @@ static int unistim_hangup(struct ast_channel *ast)
 			break;
 		}
 	}
-	refresh_all_favorite(s); /* Update favicons in case of DND keys */
+	/*refresh_all_favorite(s); */ /* TODO: Update favicons in case of DND keys */
 	if (s->state == STATE_RINGING && sub->subtype == SUB_RING) {
 		send_no_ring(s);
 		if (ast_channel_hangupcause(ast) != AST_CAUSE_ANSWERED_ELSEWHERE) {
@@ -4858,6 +4865,13 @@ static int unistim_hangup(struct ast_channel *ast)
 		}
 		if (!sub_real) {
 			show_main_page(s);
+		} else { /* hangup on a ringing line: reset status to reflect that we're still on an active call */
+				s->state = STATE_CALL;
+				send_callerid_screen(s, sub_real);
+				send_text(TEXT_LINE2, TEXT_NORMAL, s, ustmtext("is on-line", s));
+				send_text_status(s, ustmtext("       Transf        Hangup", s));
+				send_favorite_short(sub->softkey, FAV_ICON_OFFHOOK_BLACK, s);
+			
 		}
 	}
 	if (s->state == STATE_CALL && sub->subtype == SUB_REAL) {
@@ -5078,6 +5092,7 @@ static int unistim_fixup(struct ast_channel *oldchan, struct ast_channel *newcha
 	if (p->owner != oldchan) {
 		ast_log(LOG_WARNING, "old channel wasn't %s (%p) but was %s (%p)\n",
 				ast_channel_name(oldchan), oldchan, ast_channel_name(p->owner), p->owner);
+		ast_mutex_unlock(&p->lock);
 		return -1;
 	}
 
@@ -5796,6 +5811,15 @@ static struct ast_channel *unistim_request(const char *type, struct ast_format_c
 		*cause = AST_CAUSE_BUSY;
 		return NULL;
 	}
+	if (d->session->state == STATE_DIALPAGE) {
+		if (unistimdebug) {
+			ast_verb(0, "Can't create channel, user on dialpage: Busy!\n");
+		}
+		unistim_unalloc_sub(d, sub);
+		*cause = AST_CAUSE_BUSY;
+		return NULL;
+	}
+
         if (get_avail_softkey(d->session, sub->parent->name) == -1) {
 		if (unistimdebug) {
 			ast_verb(0, "Can't create channel for line %s, all lines busy\n", sub->parent->name);
@@ -5904,9 +5928,9 @@ static char *unistim_show_info(struct ast_cli_entry *e, int cmd, struct ast_cli_
 	s = sessions;
 	while (s) {
 		ast_cli(a->fd,
-				"sin=%s timeout=%u state=%s macaddr=%s device=%s session=%p\n",
+				"sin=%s timeout=%u state=%s macaddr=%s device=%p session=%p\n",
 				ast_inet_ntoa(s->sin.sin_addr), s->timeout, ptestate_tostr(s->state), s->macaddr,
-				s->device->name, s);
+				s->device, s);
 		s = s->next;
 	}
 	ast_mutex_unlock(&sessionlock);
@@ -6114,7 +6138,7 @@ static int parse_bookmark(const char *text, struct unistim_device *d)
 			return 0;
 		}
 		if (d->softkeyicon[p] != 0) {
-			ast_log(LOG_WARNING, "Invalid position %d for bookmark : already used\n:", p);
+			ast_log(LOG_WARNING, "Invalid position %d for bookmark : already used:\n", p);
 			return 0;
 		}
 		memmove(line, line + 2, sizeof(line) - 2);

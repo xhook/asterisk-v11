@@ -46,6 +46,7 @@ struct confbridge_cfg {
 	struct ao2_container *menus;
 };
 
+static int verify_default_profiles(void);
 static void *bridge_profile_alloc(const char *category);
 static void *bridge_profile_find(struct ao2_container *container, const char *category);
 static struct bridge_profile_sounds *bridge_profile_sounds_alloc(void);
@@ -179,6 +180,7 @@ static void *confbridge_cfg_alloc(void);
 
 CONFIG_INFO_STANDARD(cfg_info, cfg_handle, confbridge_cfg_alloc,
 	.files = ACO_FILES(&confbridge_conf),
+	.pre_apply_config = verify_default_profiles,
 );
 
 /*! bridge profile container functions */
@@ -899,9 +901,8 @@ static char *handle_cli_confbridge_show_bridge_profile(struct ast_cli_entry *e, 
 		break;
 	}
 
-	ast_cli(a->fd,"sound_join:           %s\n", conf_get_sound(CONF_SOUND_JOIN, b_profile.sounds));
-	ast_cli(a->fd,"sound_leave:          %s\n", conf_get_sound(CONF_SOUND_LEAVE, b_profile.sounds));
 	ast_cli(a->fd,"sound_only_person:    %s\n", conf_get_sound(CONF_SOUND_ONLY_PERSON, b_profile.sounds));
+	ast_cli(a->fd,"sound_only_one:       %s\n", conf_get_sound(CONF_SOUND_ONLY_ONE, b_profile.sounds));
 	ast_cli(a->fd,"sound_has_joined:     %s\n", conf_get_sound(CONF_SOUND_HAS_JOINED, b_profile.sounds));
 	ast_cli(a->fd,"sound_has_left:       %s\n", conf_get_sound(CONF_SOUND_HAS_LEFT, b_profile.sounds));
 	ast_cli(a->fd,"sound_kicked:         %s\n", conf_get_sound(CONF_SOUND_KICKED, b_profile.sounds));
@@ -918,6 +919,8 @@ static char *handle_cli_confbridge_show_bridge_profile(struct ast_cli_entry *e, 
 	ast_cli(a->fd,"sound_unlocked_now:   %s\n", conf_get_sound(CONF_SOUND_UNLOCKED_NOW, b_profile.sounds));
 	ast_cli(a->fd,"sound_lockednow:      %s\n", conf_get_sound(CONF_SOUND_LOCKED_NOW, b_profile.sounds));
 	ast_cli(a->fd,"sound_error_menu:     %s\n", conf_get_sound(CONF_SOUND_ERROR_MENU, b_profile.sounds));
+	ast_cli(a->fd,"sound_join:           %s\n", conf_get_sound(CONF_SOUND_JOIN, b_profile.sounds));
+	ast_cli(a->fd,"sound_leave:          %s\n", conf_get_sound(CONF_SOUND_LEAVE, b_profile.sounds));
 	ast_cli(a->fd,"sound_participants_muted:     %s\n", conf_get_sound(CONF_SOUND_PARTICIPANTS_MUTED, b_profile.sounds));
 	ast_cli(a->fd,"sound_participants_unmuted:     %s\n", conf_get_sound(CONF_SOUND_PARTICIPANTS_UNMUTED, b_profile.sounds));
 	ast_cli(a->fd,"\n");
@@ -1241,6 +1244,7 @@ static int bridge_template_handler(const struct aco_option *opt, struct ast_vari
 	 * structure of a dynamic profile will need to be altered, a completely new sounds structure must be
 	 * created instead of simply holding a reference to the one built by the config file. */
 	ast_string_field_set(sounds, onlyperson, b_profile->sounds->onlyperson);
+	ast_string_field_set(sounds, onlyone, b_profile->sounds->onlyone);
 	ast_string_field_set(sounds, hasjoin, b_profile->sounds->hasjoin);
 	ast_string_field_set(sounds, hasleft, b_profile->sounds->hasleft);
 	ast_string_field_set(sounds, kicked, b_profile->sounds->kicked);
@@ -1257,6 +1261,8 @@ static int bridge_template_handler(const struct aco_option *opt, struct ast_vari
 	ast_string_field_set(sounds, unlockednow, b_profile->sounds->unlockednow);
 	ast_string_field_set(sounds, lockednow, b_profile->sounds->lockednow);
 	ast_string_field_set(sounds, errormenu, b_profile->sounds->errormenu);
+	ast_string_field_set(sounds, join, b_profile->sounds->join);
+	ast_string_field_set(sounds, leave, b_profile->sounds->leave);
 	ast_string_field_set(sounds, participantsmuted, b_profile->sounds->participantsmuted);
 	ast_string_field_set(sounds, participantsunmuted, b_profile->sounds->participantsunmuted);
 
@@ -1279,12 +1285,45 @@ static int menu_option_handler(const struct aco_option *opt, struct ast_variable
 	return 0;
 }
 
-int conf_load_config(int reload)
+static int verify_default_profiles(void)
 {
-	if (!reload) {
-		if (aco_info_init(&cfg_info)) {
+	RAII_VAR(struct user_profile *, user_profile, NULL, ao2_cleanup);
+	RAII_VAR(struct bridge_profile *, bridge_profile, NULL, ao2_cleanup);
+	struct confbridge_cfg *cfg = aco_pending_config(&cfg_info);
+
+	if (!cfg) {
+		return 0;
+	}
+
+	bridge_profile = ao2_find(cfg->bridge_profiles, DEFAULT_BRIDGE_PROFILE, OBJ_KEY);
+	if (!bridge_profile) {
+		bridge_profile = bridge_profile_alloc(DEFAULT_BRIDGE_PROFILE);
+		if (!bridge_profile) {
 			return -1;
 		}
+		ast_log(AST_LOG_NOTICE, "Adding %s profile to app_confbridge\n", DEFAULT_BRIDGE_PROFILE);
+		aco_set_defaults(&bridge_type, DEFAULT_BRIDGE_PROFILE, bridge_profile);
+		ao2_link(cfg->bridge_profiles, bridge_profile);
+	}
+
+	user_profile = ao2_find(cfg->bridge_profiles, DEFAULT_USER_PROFILE, OBJ_KEY);
+	if (!user_profile) {
+		user_profile = user_profile_alloc(DEFAULT_USER_PROFILE);
+		if (!user_profile) {
+			return -1;
+		}
+		ast_log(AST_LOG_NOTICE, "Adding %s profile to app_confbridge\n", DEFAULT_USER_PROFILE);
+		aco_set_defaults(&user_type, DEFAULT_USER_PROFILE, user_profile);
+		ao2_link(cfg->user_profiles, user_profile);
+	}
+
+	return 0;
+}
+
+int conf_load_config(void)
+{
+	if (aco_info_init(&cfg_info)) {
+		return -1;
 	}
 
 	/* User options */
@@ -1332,26 +1371,32 @@ int conf_load_config(int reload)
 	/* Menu options */
 	aco_option_register_custom(&cfg_info, "^[0-9A-D*#]+$", ACO_REGEX, menu_types, NULL, menu_option_handler, 0);
 
-	if (aco_process_config(&cfg_info, reload) == ACO_PROCESS_ERROR) {
+	if (aco_process_config(&cfg_info, 0) == ACO_PROCESS_ERROR) {
 		goto error;
 	}
 
-	if (!reload && ast_cli_register_multiple(cli_confbridge_parser, ARRAY_LEN(cli_confbridge_parser))) {
+	if (ast_cli_register_multiple(cli_confbridge_parser, ARRAY_LEN(cli_confbridge_parser))) {
 		goto error;
 	}
 
 	return 0;
 error:
-	/* On a reload, just keep the config we already have in place. */
-	if (!reload) {
-		conf_destroy_config();
-	}
+	conf_destroy_config();
 	return -1;
+}
+
+int conf_reload_config(void)
+{
+	if (aco_process_config(&cfg_info, 1) == ACO_PROCESS_ERROR) {
+		/* On a reload, just keep the config we already have in place. */
+		return -1;
+	}
+	return 0;
 }
 
 static void conf_user_profile_copy(struct user_profile *dst, struct user_profile *src)
 {
-	memcpy(dst, src, sizeof(*dst));
+	*dst = *src;
 }
 
 const struct user_profile *conf_find_user_profile(struct ast_channel *chan, const char *user_profile_name, struct user_profile *result)

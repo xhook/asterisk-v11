@@ -588,7 +588,7 @@ ASTERISK_FILE_VERSION(__FILE__, "$Revision$")
 		</syntax>
 		<description>
 			<para>Checks a voicemail account for status.</para>
-			<para>Returns number of messages.</para>
+			<para>Returns whether there are messages waiting.</para>
 			<para>Message: Mailbox Status.</para>
 			<para>Mailbox: <replaceable>mailboxid</replaceable>.</para>
 			<para>Waiting: <literal>0</literal> if messages waiting, <literal>1</literal>
@@ -1343,7 +1343,30 @@ static int function_capable_string_allowed_with_auths(const char *evaluating, in
 	return 1;
 }
 
-/*! \brief Convert authority code to a list of options */
+/*! \brief Convert authority code to a list of options for a user. This will only
+ * display those authority codes that have an explicit match on authority */
+static const char *user_authority_to_str(int authority, struct ast_str **res)
+{
+	int i;
+	char *sep = "";
+
+	ast_str_reset(*res);
+	for (i = 0; i < ARRAY_LEN(perms) - 1; i++) {
+		if ((authority & perms[i].num) == perms[i].num) {
+			ast_str_append(res, 0, "%s%s", sep, perms[i].label);
+			sep = ",";
+		}
+	}
+
+	if (ast_str_strlen(*res) == 0)	/* replace empty string with something sensible */
+		ast_str_append(res, 0, "<none>");
+
+	return ast_str_buffer(*res);
+}
+
+
+/*! \brief Convert authority code to a list of options. Note that the EVENT_FLAG_ALL
+ * authority will always be returned. */
 static const char *authority_to_str(int authority, struct ast_str **res)
 {
 	int i;
@@ -1737,8 +1760,8 @@ static char *handle_showmanager(struct ast_cli_entry *e, int cmd, struct ast_cli
 		(user->username ? user->username : "(N/A)"),
 		(user->secret ? "<Set>" : "(N/A)"),
 		((user->acl && !ast_acl_list_is_empty(user->acl)) ? "yes" : "no"),
-		authority_to_str(user->readperm, &rauthority),
-		authority_to_str(user->writeperm, &wauthority),
+		user_authority_to_str(user->readperm, &rauthority),
+		user_authority_to_str(user->writeperm, &wauthority),
 		(user->displayconnects ? "yes" : "no"));
 	ast_cli(a->fd, "      Variables: \n");
 		for (v = user->chanvars ; v ; v = v->next) {
@@ -2248,6 +2271,7 @@ void astman_send_error_va(struct mansession *s, const struct message *m, const c
 {
 	va_list ap;
 	struct ast_str *buf;
+	char *msg;
 
 	if (!(buf = ast_str_thread_get(&astman_append_buf, ASTMAN_APPEND_BUF_INITSIZE))) {
 		return;
@@ -2257,8 +2281,13 @@ void astman_send_error_va(struct mansession *s, const struct message *m, const c
 	ast_str_set_va(&buf, 0, fmt, ap);
 	va_end(ap);
 
-	astman_send_response_full(s, m, "Error", ast_str_buffer(buf), NULL);
-	ast_free(buf);
+	/* astman_append will use the same underlying buffer, so copy the message out
+	 * before sending the response */
+	msg = ast_str_buffer(buf);
+	if (msg) {
+		msg = ast_strdupa(msg);
+	}
+	astman_send_response_full(s, m, "Error", msg, NULL);
 }
 
 void astman_send_ack(struct mansession *s, const struct message *m, char *msg)
@@ -3346,7 +3375,7 @@ static int action_hangup(struct mansession *s, const struct message *m)
 
 	/* if regex compilation fails, hangup fails */
 	if (regcomp(&regexbuf, ast_str_buffer(regex_string), REG_EXTENDED | REG_NOSUB)) {
-		astman_send_error_va(s, m, "Regex compile failed on: %s\n", name_or_regex);
+		astman_send_error_va(s, m, "Regex compile failed on: %s", name_or_regex);
 		ast_free(regex_string);
 		return 0;
 	}
@@ -3671,7 +3700,7 @@ static int action_sendtext(struct mansession *s, const struct message *m)
 		astman_send_error(s, m, "Failure");
 	}
 
-	return res;
+	return 0;
 }
 
 /*! \brief  action_redirect: The redirect manager command */
@@ -4578,6 +4607,10 @@ static int action_presencestate(struct mansession *s, const struct message *m)
 	}
 
 	state = ast_presence_state(provider, &subtype, &message);
+	if (state == AST_PRESENCE_INVALID) {
+		astman_send_error_va(s, m, "Invalid provider %s or provider in invalid state", provider);
+		return 0;
+	}
 
 	if (!ast_strlen_zero(subtype)) {
 		snprintf(subtype_header, sizeof(subtype_header),
@@ -4663,7 +4696,7 @@ static int blackfilter_cmp_fn(void *obj, void *arg, void *data, int flags)
 	return 0;
 }
 
-/*
+/*!
  * \brief Manager command to add an event filter to a manager session
  * \see For more details look at manager_add_filter
  */
@@ -4697,10 +4730,9 @@ static int action_filter(struct mansession *s, const struct message *m)
 	return 0;
 }
 
-/*
+/*!
  * \brief Add an event filter to a manager session
  *
- * \param s               manager session to modify filters on
  * \param filter_pattern  Filter syntax to add, see below for syntax
  *
  * \return FILTER_ALLOC_FAILED   Memory allocation failure
@@ -4711,9 +4743,12 @@ static int action_filter(struct mansession *s, const struct message *m)
  * Filter can be any valid regular expression
  * Filter can be a valid regular expression prefixed with !, which will add the filter as a black filter
  *
- * \example filter_pattern = "Event: Newchannel"
- * \example filter_pattern = "Event: New.*"
- * \example filter_pattern = "!Channel: DAHDI.*"
+ * Examples:
+ * \code
+ *   filter_pattern = "Event: Newchannel"
+ *   filter_pattern = "Event: New.*"
+ *   filter_pattern = "!Channel: DAHDI.*"
+ * \endcode
  *
  */
 static enum add_filter_result manager_add_filter(const char *filter_pattern, struct ao2_container *whitefilters, struct ao2_container *blackfilters) {
@@ -7530,7 +7565,15 @@ static int __init_manager(int reload, int by_external_config)
 	for (var = ast_variable_browse(cfg, "general"); var; var = var->next) {
 		val = var->value;
 
-		if (!ast_tls_read_conf(&ami_tls_cfg, &amis_desc, var->name, val)) {
+		/* read tls config options while preventing unsupported options from being set */
+		if (strcasecmp(var->name, "tlscafile")
+			&& strcasecmp(var->name, "tlscapath")
+			&& strcasecmp(var->name, "tlscadir")
+			&& strcasecmp(var->name, "tlsverifyclient")
+			&& strcasecmp(var->name, "tlsdontverifyserver")
+			&& strcasecmp(var->name, "tlsclientmethod")
+			&& strcasecmp(var->name, "sslclientmethod")
+			&& !ast_tls_read_conf(&ami_tls_cfg, &amis_desc, var->name, val)) {
 			continue;
 		}
 

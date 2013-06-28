@@ -98,12 +98,7 @@ export LDCONFIG
 export LDCONFIG_FLAGS
 export PYTHON
 
-# even though we could use '-include makeopts' here, use a wildcard
-# lookup anyway, so that make won't try to build makeopts if it doesn't
-# exist (other rules will force it to be built if needed)
-ifneq ($(wildcard makeopts),)
-  include makeopts
-endif
+-include makeopts
 
 # start the primary CFLAGS and LDFLAGS with any that were provided
 # to the configure script
@@ -252,7 +247,7 @@ MOD_SUBDIRS_MENUSELECT_TREE:=$(MOD_SUBDIRS:%=%-menuselect-tree)
 
 ifneq ($(findstring darwin,$(OSARCH)),)
   _ASTCFLAGS+=-D__Darwin__
-  _SOLINK=-Xlinker -macosx_version_min -Xlinker 10.4 -Xlinker -undefined -Xlinker dynamic_lookup -force_flat_namespace
+  _SOLINK=-Xlinker -macosx_version_min -Xlinker 10.4 -Xlinker -undefined -Xlinker dynamic_lookup
   ifeq ($(shell if test `/usr/bin/sw_vers -productVersion | cut -c4` -gt 5; then echo 6; else echo 0; fi),6)
     _SOLINK+=/usr/lib/bundle1.o
   endif
@@ -267,6 +262,9 @@ else
     _ASTLDFLAGS+=-L/usr/local/lib
   endif
 endif
+
+# Include rpath settings
+_ASTLDFLAGS+=$(AST_RPATH)
 
 ifeq ($(OSARCH),SunOS)
   SOLINK=-shared -fpic -L/usr/local/ssl/lib -lrt
@@ -308,7 +306,7 @@ else
 	mK=" make"
 endif
 
-all: _cleantest_all
+all: _all
 	@echo " +--------- Asterisk Build Complete ---------+"
 	@echo " + Asterisk has successfully been built, and +"
 	@echo " + can be installed by running:              +"
@@ -316,7 +314,7 @@ all: _cleantest_all
 	@echo " +               $(mK) install               +"
 	@echo " +-------------------------------------------+"
 
-full: _cleantest_all_full
+full: _full
 	@echo " +--------- Asterisk Build Complete ---------+"
 	@echo " + Asterisk has successfully been built, and +"
 	@echo " + can be installed by running:              +"
@@ -324,20 +322,10 @@ full: _cleantest_all_full
 	@echo " +               $(mK) install               +"
 	@echo " +-------------------------------------------+"
 
-
-# For parallel builds, we must call cleantest *before* running the
-# other dependencies on _all.
-_cleantest_all: cleantest
-	@$(MAKE) _all
-
-# For parallel builds, we must call cleantest *before* running the
-# other dependencies on _all.
-_cleantest_all_full: cleantest
-	@$(MAKE) _all_full
 
 _all: makeopts $(SUBDIRS) doc/core-en_US.xml $(ADDL_TARGETS)
 
-_all_full: makeopts $(SUBDIRS) doc/full-en_US.xml $(ADDL_TARGETS)
+_full: makeopts $(SUBDIRS) doc/full-en_US.xml $(ADDL_TARGETS)
 
 makeopts: configure
 	@echo "****"
@@ -372,7 +360,7 @@ makeopts.embed_rules: menuselect.makeopts
 	+@$(SUBMAKE) $(MOD_SUBDIRS_EMBED_LDFLAGS)
 	+@$(SUBMAKE) $(MOD_SUBDIRS_EMBED_LIBS)
 
-$(SUBDIRS): main/version.c include/asterisk/build.h include/asterisk/buildopts.h defaults.h makeopts.embed_rules
+$(SUBDIRS): makeopts .lastclean main/version.c include/asterisk/build.h include/asterisk/buildopts.h defaults.h makeopts.embed_rules
 
 ifeq ($(findstring $(OSARCH), mingw32 cygwin ),)
     # Non-windows:
@@ -392,31 +380,31 @@ $(D1): res
 res:	main
 endif
 
-$(MOD_SUBDIRS):
+$(MOD_SUBDIRS): makeopts
 	+@_ASTCFLAGS="$(MOD_SUBDIR_CFLAGS) $(_ASTCFLAGS)" ASTCFLAGS="$(ASTCFLAGS)" _ASTLDFLAGS="$(_ASTLDFLAGS)" ASTLDFLAGS="$(ASTLDFLAGS)" $(SUBMAKE) --no-builtin-rules -C $@ SUBDIR=$@ all
 
-$(OTHER_SUBDIRS):
+$(OTHER_SUBDIRS): makeopts
 	+@_ASTCFLAGS="$(OTHER_SUBDIR_CFLAGS) $(_ASTCFLAGS)" ASTCFLAGS="$(ASTCFLAGS)" _ASTLDFLAGS="$(_ASTLDFLAGS)" ASTLDFLAGS="$(ASTLDFLAGS)" $(SUBMAKE) --no-builtin-rules -C $@ SUBDIR=$@ all
 
-defaults.h: makeopts build_tools/make_defaults_h
+defaults.h: makeopts .lastclean build_tools/make_defaults_h
 	@build_tools/make_defaults_h > $@.tmp
 	@cmp -s $@.tmp $@ || mv $@.tmp $@
 	@rm -f $@.tmp
 
-main/version.c: FORCE
+main/version.c: FORCE .lastclean
 	@build_tools/make_version_c > $@.tmp
 	@cmp -s $@.tmp $@ || mv $@.tmp $@
 	@rm -f $@.tmp
 
-include/asterisk/buildopts.h: menuselect.makeopts
+include/asterisk/buildopts.h: menuselect.makeopts .lastclean
 	@build_tools/make_buildopts_h > $@.tmp
 	@cmp -s $@.tmp $@ || mv $@.tmp $@
 	@rm -f $@.tmp
 
-include/asterisk/build.h:
-	@build_tools/make_build_h > $@.tmp
-	@cmp -s $@.tmp $@ || mv $@.tmp $@
-	@rm -f $@.tmp
+# build.h must depend on .lastclean, or parallel make may wipe it out after it's
+# been created.
+include/asterisk/build.h: .lastclean
+	@build_tools/make_build_h > $@
 
 $(SUBDIRS_CLEAN):
 	+@$(SUBMAKE) -C $(@:-clean=) clean
@@ -449,7 +437,7 @@ distclean: $(SUBDIRS_DIST_CLEAN) _clean
 	rm -rf doc/api
 	rm -f build_tools/menuselect-deps
 
-datafiles: _cleantest_all doc/core-en_US.xml
+datafiles: _all doc/core-en_US.xml
 	CFLAGS="$(_ASTCFLAGS) $(ASTCFLAGS)" build_tools/mkpkgconfig "$(DESTDIR)$(libdir)/pkgconfig";
 # Should static HTTP be installed during make samples or even with its own target ala
 # webvoicemail?  There are portions here that *could* be customized but might also be
@@ -470,7 +458,7 @@ datafiles: _cleantest_all doc/core-en_US.xml
 	done
 	$(MAKE) -C sounds install
 
-doc/core-en_US.xml: $(foreach dir,$(MOD_SUBDIRS),$(shell $(GREP) -l "language=\"en_US\"" $(dir)/*.c $(dir)/*.cc 2>/dev/null))
+doc/core-en_US.xml: makeopts .lastclean $(foreach dir,$(MOD_SUBDIRS),$(shell $(GREP) -l "language=\"en_US\"" $(dir)/*.c $(dir)/*.cc 2>/dev/null))
 	@printf "Building Documentation For: "
 	@echo "<?xml version=\"1.0\" encoding=\"UTF-8\"?>" > $@
 	@echo "<!DOCTYPE docs SYSTEM \"appdocsxml.dtd\">" >> $@
@@ -484,7 +472,7 @@ doc/core-en_US.xml: $(foreach dir,$(MOD_SUBDIRS),$(shell $(GREP) -l "language=\"
 	@echo
 	@echo "</docs>" >> $@
 
-doc/full-en_US.xml: $(foreach dir,$(MOD_SUBDIRS),$(shell $(GREP) -l "language=\"en_US\"" $(dir)/*.c $(dir)/*.cc 2>/dev/null))
+doc/full-en_US.xml: makeopts .lastclean $(foreach dir,$(MOD_SUBDIRS),$(shell $(GREP) -l "language=\"en_US\"" $(dir)/*.c $(dir)/*.cc 2>/dev/null))
 ifeq ($(PYTHON),:)
 	@echo "--------------------------------------------------------------------------"
 	@echo "---        Please install python to build full documentation           ---"
@@ -558,7 +546,7 @@ installdirs:
 main-bininstall:
 	+@DESTDIR="$(DESTDIR)" ASTSBINDIR="$(ASTSBINDIR)" ASTLIBDIR="$(ASTLIBDIR)" $(SUBMAKE) -C main bininstall
 
-bininstall: _cleantest_all installdirs $(SUBDIRS_INSTALL) main-bininstall
+bininstall: _all installdirs $(SUBDIRS_INSTALL) main-bininstall
 	$(INSTALL) -m 755 contrib/scripts/astgenkey "$(DESTDIR)$(ASTSBINDIR)/"
 	$(INSTALL) -m 755 contrib/scripts/autosupport "$(DESTDIR)$(ASTSBINDIR)/"
 	if [ ! -f "$(DESTDIR)$(ASTSBINDIR)/safe_asterisk" -a ! -f /sbin/launchd ]; then \
@@ -834,8 +822,8 @@ sounds:
 # .cleancount is the global clean count, and .lastclean is the
 # last clean count we had
 
-cleantest:
-	@cmp -s .cleancount .lastclean || $(MAKE) clean
+.lastclean: .cleancount
+	@$(MAKE) clean
 	@[ -f "$(DESTDIR)$(ASTDBDIR)/astdb.sqlite3" ] || [ ! -f "$(DESTDIR)$(ASTDBDIR)/astdb" ] || [ ! -f menuselect.makeopts ] || grep -q MENUSELECT_UTILS=.*astdb2sqlite3 menuselect.makeopts || (sed -i.orig -e's/MENUSELECT_UTILS=\(.*\)/MENUSELECT_UTILS=\1 astdb2sqlite3/' menuselect.makeopts && echo "Updating menuselect.makeopts to include astdb2sqlite3" && echo "Original version backed up to menuselect.makeopts.orig")
 
 $(SUBDIRS_UNINSTALL):
@@ -913,19 +901,19 @@ MAKE_MENUSELECT=CC="$(BUILD_CC)" CXX="" LD="" AR="" RANLIB="" \
 		CFLAGS="$(BUILD_CFLAGS)" LDFLAGS="$(BUILD_LDFLAGS)" \
 		$(MAKE) -C menuselect CONFIGURE_SILENT="--silent"
 
-menuselect/menuselect: menuselect/makeopts
+menuselect/menuselect: menuselect/makeopts .lastclean
 	+$(MAKE_MENUSELECT) menuselect
 
-menuselect/cmenuselect: menuselect/makeopts
+menuselect/cmenuselect: menuselect/makeopts .lastclean
 	+$(MAKE_MENUSELECT) cmenuselect
 
-menuselect/gmenuselect: menuselect/makeopts
+menuselect/gmenuselect: menuselect/makeopts .lastclean
 	+$(MAKE_MENUSELECT) gmenuselect
 
-menuselect/nmenuselect: menuselect/makeopts
+menuselect/nmenuselect: menuselect/makeopts .lastclean
 	+$(MAKE_MENUSELECT) nmenuselect
 
-menuselect/makeopts: makeopts
+menuselect/makeopts: makeopts .lastclean
 	+$(MAKE_MENUSELECT) makeopts
 
 menuselect-tree: $(foreach dir,$(filter-out main,$(MOD_SUBDIRS)),$(wildcard $(dir)/*.c) $(wildcard $(dir)/*.cc)) build_tools/cflags.xml build_tools/cflags-devmode.xml sounds/sounds.xml build_tools/embed_modules.xml utils/utils.xml agi/agi.xml configure makeopts
@@ -953,9 +941,9 @@ menuselect-tree: $(foreach dir,$(filter-out main,$(MOD_SUBDIRS)),$(wildcard $(di
 .PHONY: distclean
 .PHONY: all
 .PHONY: _all
-.PHONY: _cleantest_all
+.PHONY: full
+.PHONY: _full
 .PHONY: prereqs
-.PHONY: cleantest
 .PHONY: uninstall
 .PHONY: _uninstall
 .PHONY: uninstall-all

@@ -1042,9 +1042,6 @@ static int negative_penalty_invalid = 0;
 /*! \brief queues.conf [general] option */
 static int log_membername_as_agent = 0;
 
-/*! \brief queues.conf [general] option */
-static int check_state_unknown = 0;
-
 /*! \brief name of the ringinuse field in the realtime database */
 static char *realtime_ringinuse_field;
 
@@ -1160,6 +1157,7 @@ struct member {
 	struct call_queue *lastqueue;	     /*!< Last queue we received a call */
 	unsigned int dead:1;                 /*!< Used to detect members deleted in realtime */
 	unsigned int delme:1;                /*!< Flag to delete entry on reload */
+	unsigned int call_pending:1;         /*!< TRUE if the Q is attempting to place a call to the member. */
 	char rt_uniqueid[80];                /*!< Unique id of realtime member entry */
 	unsigned int ringinuse:1;            /*!< Flag to ring queue members even if their status is 'inuse' */
 };
@@ -1245,6 +1243,7 @@ struct call_queue {
 	unsigned int dead:1;
 	unsigned int eventwhencalled:2;
 	unsigned int ringinuse:1;
+	unsigned int announce_to_first_user:1; /*!< Whether or not we announce to the first user in a queue */
 	unsigned int setinterfacevar:1;
 	unsigned int setqueuevar:1;
 	unsigned int setqueueentryvar:1;
@@ -2010,6 +2009,7 @@ static void init_queue(struct call_queue *q)
 	q->roundingseconds = 0; /* Default - don't announce seconds */
 	q->servicelevel = 0;
 	q->ringinuse = 1;
+	q->announce_to_first_user = 0;
 	q->setinterfacevar = 0;
 	q->setqueuevar = 0;
 	q->setqueueentryvar = 0;
@@ -2290,6 +2290,8 @@ static void queue_set_param(struct call_queue *q, const char *param, const char 
 		ast_string_field_set(q, sound_reporthold, val);
 	} else if (!strcasecmp(param, "announce-frequency")) {
 		q->announcefrequency = atoi(val);
+	} else if (!strcasecmp(param, "announce-to-first-user")) {
+		q->announce_to_first_user = ast_true(val);
 	} else if (!strcasecmp(param, "min-announce-frequency")) {
 		q->minannouncefrequency = atoi(val);
 		ast_debug(1, "%s=%s for queue '%s'\n", param, val, q->name);
@@ -3488,6 +3490,112 @@ static char *vars2manager(struct ast_channel *chan, char *vars, size_t len)
 	return vars;
 }
 
+/*!
+ * \internal
+ * \brief Check if the member status is available.
+ *
+ * \param status Member status to check if available.
+ *
+ * \retval non-zero if the member status is available.
+ */
+static int member_status_available(int status)
+{
+	return status == AST_DEVICE_NOT_INUSE || status == AST_DEVICE_UNKNOWN;
+}
+
+/*!
+ * \internal
+ * \brief Clear the member call pending flag.
+ *
+ * \param mem Queue member.
+ *
+ * \return Nothing
+ */
+static void member_call_pending_clear(struct member *mem)
+{
+	ao2_lock(mem);
+	mem->call_pending = 0;
+	ao2_unlock(mem);
+}
+
+/*!
+ * \internal
+ * \brief Set the member call pending flag.
+ *
+ * \param mem Queue member.
+ *
+ * \retval non-zero if call pending flag was already set.
+ */
+static int member_call_pending_set(struct member *mem)
+{
+	int old_pending;
+
+	ao2_lock(mem);
+	old_pending = mem->call_pending;
+	mem->call_pending = 1;
+	ao2_unlock(mem);
+
+	return old_pending;
+}
+
+/*!
+ * \internal
+ * \brief Determine if can ring a queue entry.
+ *
+ * \param qe Queue entry to check.
+ * \param call Member call attempt.
+ *
+ * \retval non-zero if an entry can be called.
+ */
+static int can_ring_entry(struct queue_ent *qe, struct callattempt *call)
+{
+	if (call->member->paused) {
+		ast_debug(1, "%s paused, can't receive call\n", call->interface);
+		return 0;
+	}
+
+	if (!call->member->ringinuse && !member_status_available(call->member->status)) {
+		ast_debug(1, "%s not available, can't receive call\n", call->interface);
+		return 0;
+	}
+
+	if ((call->lastqueue && call->lastqueue->wrapuptime && (time(NULL) - call->lastcall < call->lastqueue->wrapuptime))
+		|| (!call->lastqueue && qe->parent->wrapuptime && (time(NULL) - call->lastcall < qe->parent->wrapuptime))) {
+		ast_debug(1, "Wrapuptime not yet expired on queue %s for %s\n",
+			(call->lastqueue ? call->lastqueue->name : qe->parent->name),
+			call->interface);
+		return 0;
+	}
+
+	if (use_weight && compare_weight(qe->parent, call->member)) {
+		ast_debug(1, "Priority queue delaying call to %s:%s\n",
+			qe->parent->name, call->interface);
+		return 0;
+	}
+
+	if (!call->member->ringinuse) {
+		if (member_call_pending_set(call->member)) {
+			ast_debug(1, "%s has another call pending, can't receive call\n",
+				call->interface);
+			return 0;
+		}
+
+		/*
+		 * The queue member is available.  Get current status to be sure
+		 * because the device state and extension state callbacks may
+		 * not have updated the status yet.
+		 */
+		if (!member_status_available(get_queue_member_status(call->member))) {
+			ast_debug(1, "%s actually not available, can't receive call\n",
+				call->interface);
+			member_call_pending_clear(call->member);
+			return 0;
+		}
+	}
+
+	return 1;
+}
+
 /*! 
  * \brief Part 2 of ring_one
  *
@@ -3509,60 +3617,17 @@ static int ring_entry(struct queue_ent *qe, struct callattempt *tmp, int *busies
 	char tech[256];
 	char *location;
 	const char *macrocontext, *macroexten;
-	enum ast_device_state newstate;
 
 	/* on entry here, we know that tmp->chan == NULL */
-	if (tmp->member->paused) {
-		ast_debug(1, "%s paused, can't receive call\n", tmp->interface);
+	if (!can_ring_entry(qe, tmp)) {
 		if (ast_channel_cdr(qe->chan)) {
 			ast_cdr_busy(ast_channel_cdr(qe->chan));
 		}
 		tmp->stillgoing = 0;
-		(*busies)++;
+		++*busies;
 		return 0;
 	}
-
-	if ((tmp->lastqueue && tmp->lastqueue->wrapuptime && (time(NULL) - tmp->lastcall < tmp->lastqueue->wrapuptime)) ||
-		(!tmp->lastqueue && qe->parent->wrapuptime && (time(NULL) - tmp->lastcall < qe->parent->wrapuptime))) {
-		ast_debug(1, "Wrapuptime not yet expired on queue %s for %s\n",
-				(tmp->lastqueue ? tmp->lastqueue->name : qe->parent->name), tmp->interface);
-		if (ast_channel_cdr(qe->chan)) {
-			ast_cdr_busy(ast_channel_cdr(qe->chan));
-		}
-		tmp->stillgoing = 0;
-		(*busies)++;
-		return 0;
-	}
-
-	if (!tmp->member->ringinuse) {
-		if (check_state_unknown && (tmp->member->status == AST_DEVICE_UNKNOWN)) {
-			newstate = ast_device_state(tmp->member->interface);
-			if (newstate != tmp->member->status) {
-				ast_log(LOG_WARNING, "Found a channel matching iterface %s while status was %s changed to %s\n",
-					tmp->member->interface, ast_devstate2str(tmp->member->status), ast_devstate2str(newstate));
-				ast_devstate_changed_literal(newstate, AST_DEVSTATE_CACHABLE, tmp->member->interface);
-			}
-		}
-		if ((tmp->member->status != AST_DEVICE_NOT_INUSE) && (tmp->member->status != AST_DEVICE_UNKNOWN)) {
-			ast_debug(1, "%s in use, can't receive call\n", tmp->interface);
-			if (ast_channel_cdr(qe->chan)) {
-				ast_cdr_busy(ast_channel_cdr(qe->chan));
-			}
-			tmp->stillgoing = 0;
-			(*busies)++;
-			return 0;
-		}
-	}
-
-	if (use_weight && compare_weight(qe->parent,tmp->member)) {
-		ast_debug(1, "Priority queue delaying call to %s:%s\n", qe->parent->name, tmp->interface);
-		if (ast_channel_cdr(qe->chan)) {
-			ast_cdr_busy(ast_channel_cdr(qe->chan));
-		}
-		tmp->stillgoing = 0;
-		(*busies)++;
-		return 0;
-	}
+	ast_assert(tmp->member->ringinuse || tmp->member->call_pending);
 
 	ast_copy_string(tech, tmp->interface, sizeof(tech));
 	if ((location = strchr(tech, '/'))) {
@@ -3574,18 +3639,18 @@ static int ring_entry(struct queue_ent *qe, struct callattempt *tmp, int *busies
 	/* Request the peer */
 	tmp->chan = ast_request(tech, ast_channel_nativeformats(qe->chan), qe->chan, location, &status);
 	if (!tmp->chan) {			/* If we can't, just go on to the next call */
-		if (ast_channel_cdr(qe->chan)) {
-			ast_cdr_busy(ast_channel_cdr(qe->chan));
-		}
-		tmp->stillgoing = 0;
-
 		ao2_lock(qe->parent);
-		update_status(qe->parent, tmp->member, get_queue_member_status(tmp->member));
 		qe->parent->rrpos++;
 		qe->linpos++;
 		ao2_unlock(qe->parent);
 
-		(*busies)++;
+		member_call_pending_clear(tmp->member);
+
+		if (ast_channel_cdr(qe->chan)) {
+			ast_cdr_busy(ast_channel_cdr(qe->chan));
+		}
+		tmp->stillgoing = 0;
+		++*busies;
 		return 0;
 	}
 
@@ -3661,10 +3726,12 @@ static int ring_entry(struct queue_ent *qe, struct callattempt *tmp, int *busies
 		/* Again, keep going even if there's an error */
 		ast_verb(3, "Couldn't call %s\n", tmp->interface);
 		do_hang(tmp);
-		(*busies)++;
-		update_status(qe->parent, tmp->member, get_queue_member_status(tmp->member));
+		member_call_pending_clear(tmp->member);
+		++*busies;
 		return 0;
-	} else if (qe->parent->eventwhencalled) {
+	}
+
+	if (qe->parent->eventwhencalled) {
 		char vars[2048];
 
 		ast_channel_lock_both(tmp->chan, qe->chan);
@@ -3720,7 +3787,7 @@ static int ring_entry(struct queue_ent *qe, struct callattempt *tmp, int *busies
 		ast_verb(3, "Called %s\n", tmp->interface);
 	}
 
-	update_status(qe->parent, tmp->member, get_queue_member_status(tmp->member));
+	member_call_pending_clear(tmp->member);
 	return 1;
 }
 
@@ -4026,7 +4093,7 @@ static void rna(int rnatime, struct queue_ent *qe, char *interface, char *member
  *
  * \todo eventually all call forward logic should be intergerated into and replaced by ast_call_forward()
  */
-static struct callattempt *wait_for_answer(struct queue_ent *qe, struct callattempt *outgoing, int *to, char *digit, int prebusies, int caller_disconnect, int forwardsallowed)
+static struct callattempt *wait_for_answer(struct queue_ent *qe, struct callattempt *outgoing, int *to, char *digit, int prebusies, int caller_disconnect, int forwardsallowed, int ringing)
 {
 	const char *queue = qe->parent->name;
 	struct callattempt *o, *start = NULL, *prev = NULL;
@@ -4525,6 +4592,16 @@ skip_frame:;
 		}
 	}
 
+	/* Make a position announcement, if enabled */
+ 	if (qe->parent->announcefrequency && qe->parent->announce_to_first_user) {
+		say_position(qe, ringing);
+	}
+
+ 	/* Make a periodic announcement, if enabled */
+ 	if (qe->parent->periodicannouncefrequency && qe->parent->announce_to_first_user) {
+ 		say_periodic_announcement(qe, ringing);
+ 	}
+ 
 	if (!*to) {
 		for (o = start; o; o = o->call_next) {
 			rna(orig, qe, o->interface, o->member->membername, 1);
@@ -5315,7 +5392,7 @@ static int try_calling(struct queue_ent *qe, const struct ast_flags opts, char *
 	ring_one(qe, outgoing, &numbusies);
 	lpeer = wait_for_answer(qe, outgoing, &to, &digit, numbusies,
 		ast_test_flag(&(bridge_config.features_caller), AST_FEATURE_DISCONNECT),
-		forwardsallowed);
+		forwardsallowed, ringing);
 	/* The ast_channel_datastore_remove() function could fail here if the
 	 * datastore was moved to another channel during a masquerade. If this is
 	 * the case, don't free the datastore here because later, when the channel
@@ -5808,7 +5885,7 @@ static int try_calling(struct queue_ent *qe, const struct ast_flags opts, char *
 
 		time(&callstart);
 		transfer_ds = setup_transfer_datastore(qe, member, callstart, callcompletedinsl);
-		bridge = ast_bridge_call(qe->chan,peer, &bridge_config);
+		bridge = ast_bridge_call(qe->chan, peer, &bridge_config);
 
 		/* If the queue member did an attended transfer, then the TRANSFER already was logged in the queue_log
 		 * when the masquerade occurred. These other "ending" queue_log messages are unnecessary, except for
@@ -5824,7 +5901,7 @@ static int try_calling(struct queue_ent *qe, const struct ast_flags opts, char *
 					ast_channel_exten(qe->chan), ast_channel_context(qe->chan), (long) (callstart - qe->start),
 					(long) (time(NULL) - callstart), qe->opos);
 				send_agent_complete(qe, queuename, peer, member, callstart, vars, sizeof(vars), TRANSFER);
-			} else if (ast_check_hangup(qe->chan)) {
+			} else if (ast_check_hangup(qe->chan) && !ast_check_hangup(peer)) {
 				ast_queue_log(queuename, ast_channel_uniqueid(qe->chan), member->membername, "COMPLETECALLER", "%ld|%ld|%d",
 					(long) (callstart - qe->start), (long) (time(NULL) - callstart), qe->opos);
 				send_agent_complete(qe, queuename, peer, member, callstart, vars, sizeof(vars), CALLER);
@@ -7714,10 +7791,6 @@ static void queue_set_global_params(struct ast_config *cfg)
 	if ((general_val = ast_variable_retrieve(cfg, "general", "log_membername_as_agent"))) {
 		log_membername_as_agent = ast_true(general_val);
 	}
-	check_state_unknown = 0;
-	if ((general_val = ast_variable_retrieve(cfg, "general", "check_state_unknown"))) {
-		check_state_unknown = ast_true(general_val);
-	}
 }
 
 /*! \brief reload information pertaining to a single member
@@ -8495,7 +8568,7 @@ static int manager_queues_summary(struct mansession *s, const struct message *m)
 			while ((mem = ao2_iterator_next(&mem_iter))) {
 				if ((mem->status != AST_DEVICE_UNAVAILABLE) && (mem->status != AST_DEVICE_INVALID)) {
 					++qmemcount;
-					if (((mem->status == AST_DEVICE_NOT_INUSE) || (mem->status == AST_DEVICE_UNKNOWN)) && !(mem->paused)) {
+					if (member_status_available(mem->status) && !mem->paused) {
 						++qmemavail;
 					}
 				}
@@ -9507,6 +9580,7 @@ static struct ast_cli_entry cli_queue[] = {
 	MEMBER(call_queue, dead, AST_DATA_BOOLEAN)			\
 	MEMBER(call_queue, eventwhencalled, AST_DATA_BOOLEAN)		\
 	MEMBER(call_queue, ringinuse, AST_DATA_BOOLEAN)			\
+	MEMBER(call_queue, announce_to_first_user, AST_DATA_BOOLEAN)	\
 	MEMBER(call_queue, setinterfacevar, AST_DATA_BOOLEAN)		\
 	MEMBER(call_queue, setqueuevar, AST_DATA_BOOLEAN)		\
 	MEMBER(call_queue, setqueueentryvar, AST_DATA_BOOLEAN)		\
@@ -9769,6 +9843,9 @@ static int unload_module(void)
 	res |= ast_manager_unregister("QueuePause");
 	res |= ast_manager_unregister("QueueLog");
 	res |= ast_manager_unregister("QueuePenalty");
+	res |= ast_manager_unregister("QueueReload");
+	res |= ast_manager_unregister("QueueReset");
+	res |= ast_manager_unregister("QueueMemberRingInUse");
 	res |= ast_unregister_application(app_aqm);
 	res |= ast_unregister_application(app_rqm);
 	res |= ast_unregister_application(app_pqm);
@@ -9815,6 +9892,31 @@ static int load_module(void)
 	if (reload_handler(0, &mask, NULL))
 		return AST_MODULE_LOAD_DECLINE;
 
+	ast_realtime_require_field("queue_members", "paused", RQ_INTEGER1, 1, "uniqueid", RQ_UINTEGER2, 5, SENTINEL);
+
+	/*
+	 * This section is used to determine which name for 'ringinuse' to use in realtime members
+	 * Necessary for supporting older setups.
+	 */
+	member_config = ast_load_realtime_multientry("queue_members", "interface LIKE", "%", "queue_name LIKE", "%", SENTINEL);
+	if (!member_config) {
+		realtime_ringinuse_field = "ringinuse";
+	} else {
+		const char *config_val;
+		if ((config_val = ast_variable_retrieve(member_config, NULL, "ringinuse"))) {
+			ast_log(LOG_NOTICE, "ringinuse field entries found in queue_members table. Using 'ringinuse'\n");
+			realtime_ringinuse_field = "ringinuse";
+		} else if ((config_val = ast_variable_retrieve(member_config, NULL, "ignorebusy"))) {
+			ast_log(LOG_NOTICE, "ignorebusy field found in queue_members table with no ringinuse field. Using 'ignorebusy'\n");
+			realtime_ringinuse_field = "ignorebusy";
+		} else {
+			ast_log(LOG_NOTICE, "No entries were found for ringinuse/ignorebusy in queue_members table. Using 'ringinuse'\n");
+			realtime_ringinuse_field = "ringinuse";
+		}
+	}
+
+	ast_config_destroy(member_config);
+
 	if (queue_persistent_members)
 		reload_queue_members();
 
@@ -9857,31 +9959,6 @@ static int load_module(void)
 	}
 
 	ast_extension_state_add(NULL, NULL, extension_state_cb, NULL);
-
-	ast_realtime_require_field("queue_members", "paused", RQ_INTEGER1, 1, "uniqueid", RQ_UINTEGER2, 5, SENTINEL);
-
-	/*
-	 * This section is used to determine which name for 'ringinuse' to use in realtime members
-	 * Necessary for supporting older setups.
-	 */
-	member_config = ast_load_realtime_multientry("queue_members", "interface LIKE", "%", "queue_name LIKE", "%", SENTINEL);
-	if (!member_config) {
-		realtime_ringinuse_field = "ringinuse";
-	} else {
-		const char *config_val;
-		if ((config_val = ast_variable_retrieve(member_config, NULL, "ringinuse"))) {
-			ast_log(LOG_NOTICE, "ringinuse field entries found in queue_members table. Using 'ringinuse'\n");
-			realtime_ringinuse_field = "ringinuse";
-		} else if ((config_val = ast_variable_retrieve(member_config, NULL, "ignorebusy"))) {
-			ast_log(LOG_NOTICE, "ignorebusy field found in queue_members table with no ringinuse field. Using 'ignorebusy'\n");
-			realtime_ringinuse_field = "ignorebusy";
-		} else {
-			ast_log(LOG_NOTICE, "No entries were found for ringinuse/ignorebusy in queue_members table. Using 'ringinuse'\n");
-			realtime_ringinuse_field = "ringinuse";
-		}
-	}
-
-	ast_config_destroy(member_config);
 
 	return res ? AST_MODULE_LOAD_DECLINE : 0;
 }

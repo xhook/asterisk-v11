@@ -29,6 +29,7 @@
  */
 
 /*** MODULEINFO
+	<depend>uuid</depend>
 	<support_level>core</support_level>
  ***/
 
@@ -175,6 +176,12 @@ static int worker_terminate;
 #define COMPONENT_RTP 1
 #define COMPONENT_RTCP 2
 
+/*! \brief RTP learning mode tracking information */
+struct rtp_learning_info {
+	int max_seq;	/*!< The highest sequence number received */
+	int packets;	/*!< The number of remaining packets before the source is accepted */
+};
+
 /*! \brief RTP session description */
 struct ast_rtp {
 	int s;
@@ -245,8 +252,8 @@ struct ast_rtp {
 	 * Learning mode values based on pjmedia's probation mode.  Many of these values are redundant to the above,
 	 * but these are in place to keep learning mode sequence values sealed from their normal counterparts.
 	 */
-	uint16_t learning_max_seq;		/*!< Highest sequence number heard */
-	int learning_probation;		/*!< Sequential packets untill source is valid */
+	struct rtp_learning_info rtp_source_learn;	/* Learning mode track for the expected RTP source */
+	struct rtp_learning_info alt_source_learn;	/* Learning mode tracking for a new RTP source after one has been chosen */
 
 	struct rtp_red *red;
 
@@ -545,6 +552,7 @@ static void ast_rtp_ice_start(struct ast_rtp_instance *instance)
 		pj_ice_sess_start_check(rtp->ice);
 		pj_timer_heap_poll(timerheap, NULL);
 		rtp->ice_started = 1;
+		rtp->strict_rtp_state = STRICT_RTP_OPEN;
 	}
 }
 
@@ -1028,6 +1036,20 @@ static struct ast_rtp_engine asterisk_rtp_engine = {
 #endif
 };
 
+static void rtp_learning_seq_init(struct rtp_learning_info *info, uint16_t seq);
+
+static void ast_rtp_on_ice_complete(pj_ice_sess *ice, pj_status_t status)
+{
+	struct ast_rtp *rtp = ice->user_data;
+
+	if (!strictrtp) {
+		return;
+	}
+
+	rtp->strict_rtp_state = STRICT_RTP_LEARN;
+	rtp_learning_seq_init(&rtp->rtp_source_learn, (uint16_t)rtp->seqno);
+}
+
 static void ast_rtp_on_ice_rx_data(pj_ice_sess *ice, unsigned comp_id, unsigned transport_id, void *pkt, pj_size_t size, const pj_sockaddr_t *src_addr, unsigned src_addr_len)
 {
 	struct ast_rtp *rtp = ice->user_data;
@@ -1074,6 +1096,7 @@ static pj_status_t ast_rtp_on_ice_tx_pkt(pj_ice_sess *ice, unsigned comp_id, uns
 
 /* ICE Session interface declaration */
 static pj_ice_sess_cb ast_rtp_ice_sess_cb = {
+	.on_ice_complete = ast_rtp_on_ice_complete,
 	.on_rx_data = ast_rtp_on_ice_rx_data,
 	.on_tx_pkt = ast_rtp_on_ice_tx_pkt,
 };
@@ -1382,6 +1405,7 @@ static int __rtp_recvfrom(struct ast_rtp_instance *instance, void *buf, size_t s
 	int len;
 	struct ast_rtp *rtp = ast_rtp_instance_get_data(instance);
 	struct ast_srtp *srtp = ast_rtp_instance_get_srtp(instance);
+	char *in = buf;
 
 	if ((len = ast_recvfrom(rtcp ? rtp->rtcp->s : rtp->s, buf, size, flags, sa)) < 0) {
 	   return len;
@@ -1389,8 +1413,6 @@ static int __rtp_recvfrom(struct ast_rtp_instance *instance, void *buf, size_t s
 
 #ifdef HAVE_OPENSSL_SRTP
 	if (!rtcp) {
-		char *in = buf;
-
 		dtls_srtp_check_pending(instance, rtp);
 
 		/* If this is an SSL packet pass it to OpenSSL for processing */
@@ -1463,7 +1485,7 @@ static int __rtp_recvfrom(struct ast_rtp_instance *instance, void *buf, size_t s
 		rtp->passthrough = 0;
 	}
 
-	if (res_srtp && srtp && res_srtp->unprotect(srtp, buf, &len, rtcp) < 0) {
+	if ((*in & 0xC0) && res_srtp && srtp && res_srtp->unprotect(srtp, buf, &len, rtcp) < 0) {
 	   return -1;
 	}
 
@@ -1585,13 +1607,13 @@ static int create_new_socket(const char *type, int af)
  * \brief Initializes sequence values and probation for learning mode.
  * \note This is an adaptation of pjmedia's pjmedia_rtp_seq_init function.
  *
- * \param rtp pointer to rtp struct used with the received rtp packet.
- * \param seq sequence number read from the rtp header
+ * \param info The learning information to track
+ * \param seq sequence number read from the rtp header to initialize the information with
  */
-static void rtp_learning_seq_init(struct ast_rtp *rtp, uint16_t seq)
+static void rtp_learning_seq_init(struct rtp_learning_info *info, uint16_t seq)
 {
-	rtp->learning_max_seq = seq - 1;
-	rtp->learning_probation = learning_min_sequential;
+	info->max_seq = seq - 1;
+	info->packets = learning_min_sequential;
 }
 
 /*!
@@ -1599,29 +1621,23 @@ static void rtp_learning_seq_init(struct ast_rtp *rtp, uint16_t seq)
  * \brief Updates sequence information for learning mode and determines if probation/learning mode should remain in effect.
  * \note This function was adapted from pjmedia's pjmedia_rtp_seq_update function.
  *
- * \param rtp pointer to rtp struct used with the received rtp packet.
+ * \param info Structure tracking the learning progress of some address
  * \param seq sequence number read from the rtp header
- * \return boolean value indicating if probation mode is active at the end of the function
+ * \retval 0 if probation mode should exit for this address
+ * \retval non-zero if probation mode should continue
  */
-static int rtp_learning_rtp_seq_update(struct ast_rtp *rtp, uint16_t seq)
+static int rtp_learning_rtp_seq_update(struct rtp_learning_info *info, uint16_t seq)
 {
-	int probation = 1;
-
-	ast_debug(1, "%p -- probation = %d, seq = %d\n", rtp, rtp->learning_probation, seq);
-
-	if (seq == rtp->learning_max_seq + 1) {
+	if (seq == info->max_seq + 1) {
 		/* packet is in sequence */
-		rtp->learning_probation--;
-		rtp->learning_max_seq = seq;
-		if (rtp->learning_probation == 0) {
-			probation = 0;
-		}
+		info->packets--;
 	} else {
-		rtp->learning_probation = learning_min_sequential - 1;
-		rtp->learning_max_seq = seq;
+		/* Sequence discontinuity; reset */
+		info->packets = learning_min_sequential - 1;
 	}
+	info->max_seq = seq;
 
-	return probation;
+	return (info->packets == 0);
 }
 
 static void rtp_add_candidates_to_ice(struct ast_rtp_instance *instance, struct ast_rtp *rtp, struct ast_sockaddr *addr, int port, int component,
@@ -1712,7 +1728,8 @@ static int ast_rtp_new(struct ast_rtp_instance *instance,
 	rtp->seqno = ast_random() & 0xffff;
 	rtp->strict_rtp_state = (strictrtp ? STRICT_RTP_LEARN : STRICT_RTP_OPEN);
 	if (strictrtp) {
-		rtp_learning_seq_init(rtp, (uint16_t)rtp->seqno);
+		rtp_learning_seq_init(&rtp->rtp_source_learn, (uint16_t)rtp->seqno);
+		rtp_learning_seq_init(&rtp->alt_source_learn, (uint16_t)rtp->seqno);
 	}
 
 	/* Create a new socket for us to listen on and use */
@@ -2001,7 +2018,7 @@ static int ast_rtp_dtmf_end_with_duration(struct ast_rtp_instance *instance, cha
 {
 	struct ast_rtp *rtp = ast_rtp_instance_get_data(instance);
 	struct ast_sockaddr remote_address = { {0,} };
-	int hdrlen = 12, res = 0, i = 0;
+	int hdrlen = 12, res = -1, i = 0;
 	char data[256];
 	unsigned int *rtpheader = (unsigned int*)data;
 	unsigned int measured_samples;
@@ -2010,7 +2027,7 @@ static int ast_rtp_dtmf_end_with_duration(struct ast_rtp_instance *instance, cha
 
 	/* Make sure we know where the remote side is so we can send them the packet we construct */
 	if (ast_sockaddr_isnull(&remote_address)) {
-		return -1;
+		goto cleanup;
 	}
 
 	/* Convert the given digit to the one we are going to send */
@@ -2026,7 +2043,7 @@ static int ast_rtp_dtmf_end_with_duration(struct ast_rtp_instance *instance, cha
 		digit = digit - 'a' + 12;
 	} else {
 		ast_log(LOG_WARNING, "Don't know how to represent '%c'\n", digit);
-		return -1;
+		goto cleanup;
 	}
 
 	rtp->dtmfmute = ast_tvadd(ast_tvnow(), ast_tv(0, 500000));
@@ -2067,13 +2084,15 @@ static int ast_rtp_dtmf_end_with_duration(struct ast_rtp_instance *instance, cha
 
 		rtp->seqno++;
 	}
+	res = 0;
 
 	/* Oh and we can't forget to turn off the stuff that says we are sending DTMF */
 	rtp->lastts += rtp->send_duration;
+cleanup:
 	rtp->sending_digit = 0;
 	rtp->send_digit = 0;
 
-	return 0;
+	return res;
 }
 
 static int ast_rtp_dtmf_end(struct ast_rtp_instance *instance, char digit)
@@ -3541,33 +3560,42 @@ static struct ast_frame *ast_rtp_read(struct ast_rtp_instance *instance, int rtc
 
 	/* If strict RTP protection is enabled see if we need to learn the remote address or if we need to drop the packet */
 	if (rtp->strict_rtp_state == STRICT_RTP_LEARN) {
-		ast_debug(1, "%p -- start learning mode pass with addr = %s\n", rtp, ast_sockaddr_stringify(&addr));
+		ast_debug(1, "%p -- Probation learning mode pass with source address %s\n", rtp, ast_sockaddr_stringify(&addr));
 		/* For now, we always copy the address. */
 		ast_sockaddr_copy(&rtp->strict_rtp_address, &addr);
 
 		/* Send the rtp and the seqno from header to rtp_learning_rtp_seq_update to see whether we can exit or not*/
-		if (rtp_learning_rtp_seq_update(rtp, ntohl(rtpheader[0]))) {
-			ast_debug(1, "%p -- Condition for learning hasn't exited, so reject the frame.\n", rtp);
+		if (rtp_learning_rtp_seq_update(&rtp->rtp_source_learn, seqno)) {
+			ast_debug(1, "%p -- Probation at seq %d with %d to go; discarding frame\n",
+				rtp, rtp->rtp_source_learn.max_seq, rtp->rtp_source_learn.packets);
 			return &ast_null_frame;
 		}
 
-		ast_debug(1, "%p -- Probation Ended. Set strict_rtp_state to STRICT_RTP_CLOSED with address %s\n", rtp, ast_sockaddr_stringify(&addr));
+		ast_verb(4, "%p -- Probation passed - setting RTP source address to %s\n", rtp, ast_sockaddr_stringify(&addr));
 		rtp->strict_rtp_state = STRICT_RTP_CLOSED;
-	} else if (rtp->strict_rtp_state == STRICT_RTP_CLOSED) {
-		if (ast_sockaddr_cmp(&rtp->strict_rtp_address, &addr)) {
-			/* Hmm, not the strict addres. Perhaps we're getting audio from the alternate? */
+	}
+	if (rtp->strict_rtp_state == STRICT_RTP_CLOSED) {
+		if (!ast_sockaddr_cmp(&rtp->strict_rtp_address, &addr)) {
+			/* Always reset the alternate learning source */
+			rtp_learning_seq_init(&rtp->alt_source_learn, seqno);
+		} else {
+			/* Hmm, not the strict address. Perhaps we're getting audio from the alternate? */
 			if (!ast_sockaddr_cmp(&rtp->alt_rtp_address, &addr)) {
 				/* ooh, we did! You're now the new expected address, son! */
 				ast_sockaddr_copy(&rtp->strict_rtp_address,
 						  &addr);
-			} else  {
-				const char *real_addr = ast_strdupa(ast_sockaddr_stringify(&addr));
-				const char *expected_addr = ast_strdupa(ast_sockaddr_stringify(&rtp->strict_rtp_address));
-
-				ast_debug(1, "Received RTP packet from %s, dropping due to strict RTP protection. Expected it to be from %s\n",
-						real_addr, expected_addr);
-
-				return &ast_null_frame;
+			} else {
+				/* Start trying to learn from the new address. If we pass a probationary period with
+				 * it, that means we've stopped getting RTP from the original source and we should
+				 * switch to it.
+				 */
+				if (rtp_learning_rtp_seq_update(&rtp->alt_source_learn, seqno)) {
+					ast_debug(1, "%p -- Received RTP packet from %s, dropping due to strict RTP protection. Will switch to it in %d packets\n",
+							rtp, ast_sockaddr_stringify(&addr), rtp->alt_source_learn.packets);
+					return &ast_null_frame;
+				}
+				ast_verb(4, "%p -- Switching RTP source address to %s\n", rtp, ast_sockaddr_stringify(&addr));
+				ast_sockaddr_copy(&rtp->strict_rtp_address, &addr);
 			}
 		}
 	}
@@ -3626,6 +3654,9 @@ static struct ast_frame *ast_rtp_read(struct ast_rtp_instance *instance, int rtc
 
 		f = ast_frisolate(&srcupdate);
 		AST_LIST_INSERT_TAIL(&frames, f, frame_list);
+
+		rtp->last_seqno = 0;
+		rtp->last_end_timestamp = 0;
 	}
 
 	rtp->rxssrc = ssrc;
@@ -3942,9 +3973,9 @@ static void ast_rtp_remote_address_set(struct ast_rtp_instance *instance, struct
 
 	rtp->rxseqno = 0;
 
-	if (strictrtp) {
+	if (strictrtp && rtp->strict_rtp_state != STRICT_RTP_OPEN) {
 		rtp->strict_rtp_state = STRICT_RTP_LEARN;
-		rtp_learning_seq_init(rtp, rtp->seqno);
+		rtp_learning_seq_init(&rtp->rtp_source_learn, rtp->seqno);
 	}
 
 	return;
@@ -4150,8 +4181,7 @@ static int ast_rtp_sendcng(struct ast_rtp_instance *instance, int level)
 {
 	unsigned int *rtpheader;
 	int hdrlen = 12;
-	int res;
-	int payload;
+	int res, payload = 0;
 	char data[256];
 	struct ast_rtp *rtp = ast_rtp_instance_get_data(instance);
 	struct ast_sockaddr remote_address = { {0,} };
@@ -4171,7 +4201,7 @@ static int ast_rtp_sendcng(struct ast_rtp_instance *instance, int level)
 
 	/* Get a pointer to the header */
 	rtpheader = (unsigned int *)data;
-	rtpheader[0] = htonl((2 << 30) | (1 << 23) | (payload << 16) | (rtp->seqno++));
+	rtpheader[0] = htonl((2 << 30) | (payload << 16) | (rtp->seqno));
 	rtpheader[1] = htonl(rtp->lastts);
 	rtpheader[2] = htonl(rtp->ssrc); 
 	data[12] = level;
@@ -4191,6 +4221,8 @@ static int ast_rtp_sendcng(struct ast_rtp_instance *instance, int level)
 			    ice ? " (via ICE)" : "",
 			    AST_RTP_CN, rtp->seqno, rtp->lastdigitts, res - hdrlen);
 	}
+
+	rtp->seqno++;
 
 	return res;
 }

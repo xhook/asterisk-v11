@@ -1677,6 +1677,14 @@ static int reset_user_pw(const char *context, const char *mailbox, const char *n
 	return res;
 }
 
+/*!
+ * \brief Check if configuration file is valid
+ */
+static inline int valid_config(const struct ast_config *cfg)
+{
+	return cfg && cfg != CONFIG_STATUS_FILEINVALID;
+}
+
 /*! 
  * \brief The handler for the change password option.
  * \param vmu The voicemail user to work with.
@@ -1713,7 +1721,7 @@ static void vm_change_password(struct ast_vm_user *vmu, const char *newpassword)
 		}
 		/* Fall-through */
 	case OPT_PWLOC_VOICEMAILCONF:
-		if ((cfg = ast_config_load(VOICEMAIL_CONFIG, config_flags)) && cfg != CONFIG_STATUS_FILEINVALID) {
+		if ((cfg = ast_config_load(VOICEMAIL_CONFIG, config_flags)) && valid_config(cfg)) {
 			while ((category = ast_category_browse(cfg, category))) {
 				if (!strcasecmp(category, vmu->context)) {
 					if (!(tmp = ast_variable_retrieve(cfg, category, vmu->mailbox))) {
@@ -1742,14 +1750,17 @@ static void vm_change_password(struct ast_vm_user *vmu, const char *newpassword)
 				reset_user_pw(vmu->context, vmu->mailbox, newpassword);
 				ast_copy_string(vmu->password, newpassword, sizeof(vmu->password));
 				ast_config_text_file_save(VOICEMAIL_CONFIG, cfg, "AppVoicemail");
+				ast_config_destroy(cfg);
 				break;
 			}
+
+			ast_config_destroy(cfg);
 		}
 		/* Fall-through */
 	case OPT_PWLOC_USERSCONF:
 		/* check users.conf and update the password stored for the mailbox */
 		/* if no vmsecret entry exists create one. */
-		if ((cfg = ast_config_load("users.conf", config_flags)) && cfg != CONFIG_STATUS_FILEINVALID) {
+		if ((cfg = ast_config_load("users.conf", config_flags)) && valid_config(cfg)) {
 			ast_debug(4, "we are looking for %s\n", vmu->mailbox);
 			for (category = ast_category_browse(cfg, NULL); category; category = ast_category_browse(cfg, category)) {
 				ast_debug(4, "users.conf: %s\n", category);
@@ -1783,6 +1794,8 @@ static void vm_change_password(struct ast_vm_user *vmu, const char *newpassword)
 				ast_copy_string(vmu->password, newpassword, sizeof(vmu->password));
 				ast_config_text_file_save("users.conf", cfg, "AppVoicemail");
 			}
+
+			ast_config_destroy(cfg);
 		}
 	}
 }
@@ -3530,6 +3543,16 @@ static int vm_lock_path(const char *path)
 	}
 }
 
+#define MSG_ID_LEN 256
+
+/* Used to attach a unique identifier to an msg_id */
+static int msg_id_incrementor;
+
+/*!
+ * \brief Sets the destination string to a uniquely identifying msg_id string
+ * \param dst pointer to a character buffer that should contain MSG_ID_LEN characters.
+ */
+static void generate_msg_id(char *dst);
 
 #ifdef ODBC_STORAGE
 struct generic_prepare_struct {
@@ -3559,6 +3582,33 @@ static SQLHSTMT generic_prepare(struct odbc_obj *obj, void *data)
 		SQLBindParameter(stmt, i + 1, SQL_PARAM_INPUT, SQL_C_CHAR, SQL_CHAR, strlen(gps->argv[i]), 0, gps->argv[i], 0, NULL);
 
 	return stmt;
+}
+
+static void odbc_update_msg_id(char *dir, int msg_num, char *msg_id)
+{
+	SQLHSTMT stmt;
+	char sql[PATH_MAX];
+	struct odbc_obj *obj;
+	char msg_num_str[20];
+	char *argv[] = { msg_id, dir, msg_num_str };
+	struct generic_prepare_struct gps = { .sql = sql, .argc = 3, .argv = argv };
+
+	obj = ast_odbc_request_obj(odbc_database, 0);
+	if (!obj) {
+		ast_log(LOG_WARNING, "Unable to update message ID for message %d in %s\n", msg_num, dir);
+		return;
+	}
+
+	snprintf(msg_num_str, sizeof(msg_num_str), "%d", msg_num);
+	snprintf(sql, sizeof(sql), "UPDATE %s SET msg_id=? WHERE dir=? AND msgnum=?", odbc_table);
+	stmt = ast_odbc_prepare_and_execute(obj, generic_prepare, &gps);
+	if (!stmt) {
+		ast_log(LOG_WARNING, "SQL Execute error!\n[%s]\n\n", sql);
+	} else {
+		SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+	}
+	ast_odbc_release_obj(obj);
+	return;
 }
 
 /*!
@@ -3709,7 +3759,12 @@ static int retrieve_file(char *dir, int msgnum)
 				}
 			} else {
 				res = SQLGetData(stmt, x + 1, SQL_CHAR, rowdata, sizeof(rowdata), NULL);
-				if ((res != SQL_SUCCESS) && (res != SQL_SUCCESS_WITH_INFO)) {
+				if ((res == SQL_NULL_DATA) && (!strcasecmp(coltitle, "msg_id"))) {
+					char msg_id[MSG_ID_LEN];
+					generate_msg_id(msg_id);
+					snprintf(rowdata, sizeof(rowdata), "%s", msg_id);
+					odbc_update_msg_id(dir, msgnum, msg_id);
+				} else if ((res != SQL_SUCCESS) && (res != SQL_SUCCESS_WITH_INFO)) {
 					ast_log(AST_LOG_WARNING, "SQL Get Data error! coltitle=%s\n[%s]\n\n", coltitle, sql);
 					SQLFreeHandle (SQL_HANDLE_STMT, stmt);
 					ast_odbc_release_obj(obj);
@@ -3956,16 +4011,18 @@ static void copy_file(char *sdir, int smsg, char *ddir, int dmsg, char *dmailbox
 	char sql[512];
 	char msgnums[20];
 	char msgnumd[20];
+	char msg_id[MSG_ID_LEN];
 	struct odbc_obj *obj;
-	char *argv[] = { ddir, msgnumd, dmailboxuser, dmailboxcontext, sdir, msgnums };
-	struct generic_prepare_struct gps = { .sql = sql, .argc = 6, .argv = argv };
+	char *argv[] = { ddir, msgnumd, msg_id, dmailboxuser, dmailboxcontext, sdir, msgnums };
+	struct generic_prepare_struct gps = { .sql = sql, .argc = 7, .argv = argv };
 
+	generate_msg_id(msg_id);
 	delete_file(ddir, dmsg);
 	obj = ast_odbc_request_obj(odbc_database, 0);
 	if (obj) {
 		snprintf(msgnums, sizeof(msgnums), "%d", smsg);
 		snprintf(msgnumd, sizeof(msgnumd), "%d", dmsg);
-		snprintf(sql, sizeof(sql), "INSERT INTO %s (dir, msgnum, context, macrocontext, callerid, origtime, duration, recording, flag, mailboxuser, mailboxcontext) SELECT ?,?,context,macrocontext,callerid,origtime,duration,recording,flag,?,? FROM %s WHERE dir=? AND msgnum=?", odbc_table, odbc_table);
+		snprintf(sql, sizeof(sql), "INSERT INTO %s (dir, msgnum, msg_id, context, macrocontext, callerid, origtime, duration, recording, flag, mailboxuser, mailboxcontext) SELECT ?,?,?,context,macrocontext,callerid,origtime,duration,recording,flag,?,? FROM %s WHERE dir=? AND msgnum=?", odbc_table, odbc_table);
 		stmt = ast_odbc_prepare_and_execute(obj, generic_prepare, &gps);
 		if (!stmt)
 			ast_log(AST_LOG_WARNING, "SQL Execute error!\n[%s] (You probably don't have MySQL 4.1 or later installed)\n\n", sql);
@@ -4093,7 +4150,7 @@ static int store_file(const char *dir, const char *mailboxuser, const char *mail
 			res = -1;
 			break;
 		}
-		if (cfg && cfg != CONFIG_STATUS_FILEINVALID) {
+		if (valid_config(cfg)) {
 			if (!(idata.context = ast_variable_retrieve(cfg, "message", "context"))) {
 				idata.context = "";
 			}
@@ -4149,40 +4206,13 @@ static int store_file(const char *dir, const char *mailboxuser, const char *mail
 	if (obj) {
 		ast_odbc_release_obj(obj);
 	}
-	if (cfg)
+	if (valid_config(cfg))
 		ast_config_destroy(cfg);
 	if (fdm != MAP_FAILED)
 		munmap(fdm, fdlen);
 	if (fd > -1)
 		close(fd);
 	return res;
-}
-
-static void odbc_update_msg_id(char *dir, int msg_num, char *msg_id)
-{
-	SQLHSTMT stmt;
-	char sql[PATH_MAX];
-	struct odbc_obj *obj;
-	char msg_num_str[20];
-	char *argv[] = { msg_id, dir, msg_num_str };
-	struct generic_prepare_struct gps = { .sql = sql, .argc = 3, .argv = argv };
-
-	obj = ast_odbc_request_obj(odbc_database, 0);
-	if (!obj) {
-		ast_log(LOG_WARNING, "Unable to update message ID for message %d in %s\n", msg_num, dir);
-		return;
-	}
-
-	snprintf(msg_num_str, sizeof(msg_num_str), "%d", msg_num);
-	snprintf(sql, sizeof(sql), "UPDATE %s SET msg_id=? WHERE dir=? AND msgnum=?", odbc_table);
-	stmt = ast_odbc_prepare_and_execute(obj, generic_prepare, &gps);
-	if (!stmt) {
-		ast_log(LOG_WARNING, "SQL Execute error!\n[%s]\n\n", sql);
-	} else {
-		SQLFreeHandle(SQL_HANDLE_STMT, stmt);
-	}
-	ast_odbc_release_obj(obj);
-	return;
 }
 
 /*!
@@ -4655,7 +4685,7 @@ static void prep_email_sub_vars(struct ast_channel *ast, struct ast_vm_user *vmu
 	if (strlen(fromfile) < sizeof(fromfile) - 5) {
 		strcat(fromfile, ".txt");
 	}
-	if (!(msg_cfg = ast_config_load(fromfile, config_flags))) {
+	if (!(msg_cfg = ast_config_load(fromfile, config_flags)) || !(valid_config(msg_cfg))) {
 		ast_debug(1, "Config load for message text file '%s' failed\n", fromfile);
 		return;
 	}
@@ -5047,7 +5077,7 @@ static void make_email_file(FILE *p,
 			if (strlen(fromfile) < sizeof(fromfile) - 5) {
 				strcat(fromfile, ".txt");
 			}
-			if ((msg_cfg = ast_config_load(fromfile, config_flags))) {
+			if ((msg_cfg = ast_config_load(fromfile, config_flags)) && valid_config(msg_cfg)) {
 				if ((v = ast_variable_retrieve(msg_cfg, "message", "callerid"))) {
 					ast_copy_string(origcallerid, v, sizeof(origcallerid));
 				}
@@ -5885,7 +5915,10 @@ static void run_externnotify(char *context, char *extension, const char *flag)
 		if (inboxcount2(ext_context, &urgentvoicemails, &newvoicemails, &oldvoicemails)) {
 			ast_log(AST_LOG_ERROR, "Problem in calculating number of voicemail messages available for extension %s\n", extension);
 		} else {
-			snprintf(arguments, sizeof(arguments), "%s %s %s %d %d %d &", externnotify, context, extension, newvoicemails, oldvoicemails, urgentvoicemails);
+			snprintf(arguments, sizeof(arguments), "%s %s %s %d %d %d &",
+				externnotify, S_OR(context, "\"\""),
+				extension, newvoicemails,
+				oldvoicemails, urgentvoicemails);
 			ast_debug(1, "Executing %s\n", arguments);
 			ast_safe_system(arguments);
 		}
@@ -5902,6 +5935,16 @@ struct leave_vm_options {
 	signed char record_gain;
 	char *exitcontext;
 };
+
+static void generate_msg_id(char *dst)
+{
+	/* msg id is time of msg_id generation plus an incrementing value
+	 * called each time a new msg_id is generated. This should achieve uniqueness,
+	 * but only in single system solutions.
+	 */
+	int unique_counter = ast_atomic_fetchadd_int(&msg_id_incrementor, +1);
+	snprintf(dst, MSG_ID_LEN, "%ld-%08x", (long) time(NULL), unique_counter);
+}
 
 /*!
  * \internal
@@ -5952,7 +5995,7 @@ static int msg_create_from_file(struct ast_vm_recording_data *recdata)
 	/* We aren't currently doing anything with category, since it comes from a channel variable and
 	 * this function doesn't use channels, but this function could add that as an argument later. */
 	const char *category = NULL; /* pointless for now */
-	char msg_id[256];
+	char msg_id[MSG_ID_LEN];
 
 	/* Start by checking to see if the file actually exists... */
 	if (!(ast_fileexists(recdata->recording_file, recdata->recording_ext, NULL))) {
@@ -6005,15 +6048,7 @@ static int msg_create_from_file(struct ast_vm_recording_data *recdata)
 	/* Store information */
 	txt = fdopen(txtdes, "w+");
 	if (txt) {
-		char msg_id_hash[256];
-
-		/* Every voicemail msg gets its own unique msg id.  The msg id is the originate time
-		 * plus a hash of the extension, context, and callerid of the channel leaving the msg */
-
-		snprintf(msg_id_hash, sizeof(msg_id_hash), "%s%s%s", recdata->call_extension, 
-			recdata->call_context, recdata->call_callerid);
-		snprintf(msg_id, sizeof(msg_id), "%ld-%d", (long) time(NULL), ast_str_hash(msg_id_hash));
-
+		generate_msg_id(msg_id);
 		get_date(date, sizeof(date));
 		fprintf(txt,
 			";\n"
@@ -6481,7 +6516,7 @@ static int leave_voicemail(struct ast_channel *chan, char *ext, struct leave_vm_
 	/* The meat of recording the message...  All the announcements and beeps have been played*/
 	ast_copy_string(fmt, vmfmts, sizeof(fmt));
 	if (!ast_strlen_zero(fmt)) {
-		char msg_id[256] = "";
+		char msg_id[MSG_ID_LEN] = "";
 		msgnum = 0;
 
 #ifdef IMAP_STORAGE
@@ -6574,13 +6609,7 @@ static int leave_voicemail(struct ast_channel *chan, char *ext, struct leave_vm_
 		/* Store information */
 		txt = fdopen(txtdes, "w+");
 		if (txt) {
-			char msg_id_hash[256] = "";
-
-			/* Every voicemail msg gets its own unique msg id.  The msg id is the originate time
-			 * plus a hash of the extension, context, and callerid of the channel leaving the msg */
-			snprintf(msg_id_hash, sizeof(msg_id_hash), "%s%s%s", ast_channel_exten(chan), ast_channel_context(chan), callerid);
-			snprintf(msg_id, sizeof(msg_id), "%ld-%d", (long) time(NULL), ast_str_hash(msg_id_hash));
-
+			generate_msg_id(msg_id);
 			get_date(date, sizeof(date));
 			ast_callerid_merge(callerid, sizeof(callerid),
 				S_COR(ast_channel_caller(chan)->id.name.valid, ast_channel_caller(chan)->id.name.str, NULL),
@@ -7534,7 +7563,7 @@ static int vm_forwardoptions(struct ast_channel *chan, struct ast_vm_user *vmu, 
 	strncat(backup, "-bak", sizeof(backup) - strlen(backup) - 1);
 	strncat(backup_textfile, "-bak.txt", sizeof(backup_textfile) - strlen(backup_textfile) - 1);
 
-	if ((msg_cfg = ast_config_load(textfile, config_flags)) && msg_cfg != CONFIG_STATUS_FILEINVALID && (duration_str = ast_variable_retrieve(msg_cfg, "message", "duration"))) {
+	if ((msg_cfg = ast_config_load(textfile, config_flags)) && valid_config(msg_cfg) && (duration_str = ast_variable_retrieve(msg_cfg, "message", "duration"))) {
 		*duration = atoi(duration_str);
 	} else {
 		*duration = 0;
@@ -7570,7 +7599,7 @@ static int vm_forwardoptions(struct ast_channel *chan, struct ast_vm_user *vmu, 
 			*duration = 0;
 
 			/* if we can't read the message metadata, stop now */
-			if (!msg_cfg) {
+			if (!valid_config(msg_cfg)) {
 				cmd = 0;
 				break;
 			}
@@ -7654,7 +7683,7 @@ static int vm_forwardoptions(struct ast_channel *chan, struct ast_vm_user *vmu, 
 		}
 	}
 
-	if (msg_cfg)
+	if (valid_config(msg_cfg))
 		ast_config_destroy(msg_cfg);
 	if (prepend_duration)
 		*duration = prepend_duration;
@@ -8414,7 +8443,7 @@ static int play_message(struct ast_channel *chan, struct ast_vm_user *vmu, struc
 	snprintf(filename, sizeof(filename), "%s.txt", vms->fn);
 	RETRIEVE(vms->curdir, vms->curmsg, vmu->mailbox, vmu->context);
 	msg_cfg = ast_config_load(filename, config_flags);
-	if (!msg_cfg || msg_cfg == CONFIG_STATUS_FILEINVALID) {
+	if (!valid_config(msg_cfg)) {
 		ast_log(LOG_WARNING, "No message attribute file?!! (%s)\n", filename);
 		return 0;
 	}
@@ -8492,7 +8521,7 @@ static int play_message(struct ast_channel *chan, struct ast_vm_user *vmu, struc
 		}
 	}
 
-	if (!msg_cfg) {
+	if (!valid_config(msg_cfg)) {
 		ast_log(AST_LOG_WARNING, "No message attribute file?!! (%s)\n", filename);
 		return 0;
 	}
@@ -11584,21 +11613,11 @@ static int vm_exec(struct ast_channel *chan, const char *data)
 	return res;
 }
 
-static void generate_random_string(char *buf, size_t size)
-{
-	long val[4];
-	int x;
-
-	for (x=0; x<4; x++)
-		val[x] = ast_random();
-	snprintf(buf, size, "%08lx%08lx%08lx%08lx", val[0], val[1], val[2], val[3]);
-}
-
 static int add_message_id(struct ast_config *msg_cfg, char *dir, int msg, char *filename, char *id, size_t id_size, struct ast_vm_user *vmu, int folder)
 {
 	struct ast_variable *var;
 	struct ast_category *cat;
-	generate_random_string(id, id_size);
+	generate_msg_id(id);
 
 	var = ast_variable_new("msg_id", id, "");
 	if (!var) {
@@ -13559,7 +13578,7 @@ static void read_password_from_file(const char *secretfn, char *password, int pa
 	struct ast_flags config_flags = { 0 };
 
 	pwconf = ast_config_load(secretfn, config_flags);
-	if (pwconf) {
+	if (valid_config(pwconf)) {
 		const char *val = ast_variable_retrieve(pwconf, "general", "password");
 		if (val) {
 			ast_copy_string(password, val, passwordlen);
@@ -14046,7 +14065,7 @@ AST_TEST_DEFINE(test_voicemail_load_config)
 	fputs("00000002 => 9999,Mrs. Test\n", file);
 	fclose(file);
 
-	if (!(cfg = ast_config_load(config_filename, config_flags))) {
+	if (!(cfg = ast_config_load(config_filename, config_flags)) || !valid_config(cfg)) {
 		res = AST_TEST_FAIL;
 		goto cleanup;
 	}
@@ -14364,7 +14383,7 @@ static int advanced_options(struct ast_channel *chan, struct ast_vm_user *vmu, s
 	RETRIEVE(vms->curdir, vms->curmsg, vmu->mailbox, vmu->context);
 	msg_cfg = ast_config_load(filename, config_flags);
 	DISPOSE(vms->curdir, vms->curmsg);
-	if (!msg_cfg || msg_cfg == CONFIG_STATUS_FILEINVALID) {
+	if (!valid_config(msg_cfg)) {
 		ast_log(AST_LOG_WARNING, "No message attribute file?!! (%s)\n", filename);
 		return 0;
 	}
@@ -14526,9 +14545,9 @@ static int advanced_options(struct ast_channel *chan, struct ast_vm_user *vmu, s
 		break;
 	}
 
-#ifndef IMAP_STORAGE
 	ast_config_destroy(msg_cfg);
 
+#ifndef IMAP_STORAGE
 	if (!res) {
 		make_file(vms->fn, sizeof(vms->fn), vms->curdir, msg);
 		vms->heard[msg] = 1;
@@ -14807,8 +14826,8 @@ static int vm_test_destroy_user(const char *context, const char *mailbox)
 
 	AST_LIST_LOCK(&users);
 	AST_LIST_TRAVERSE_SAFE_BEGIN(&users, vmu, list) {
-		if (!strncmp(context, vmu->context, sizeof(context))
-			&& !strncmp(mailbox, vmu->mailbox, sizeof(mailbox))) {
+		if (!strcmp(context, vmu->context)
+			&& !strcmp(mailbox, vmu->mailbox)) {
 			AST_LIST_REMOVE_CURRENT(list);
 			ast_free(vmu);
 			break;
@@ -14884,7 +14903,7 @@ static int vm_msg_snapshot_create(struct ast_vm_user *vmu,
 			 * message ID. Add one to the message config
 			 * if it does not already exist
 			 */
-			char id[33];
+			char id[MSG_ID_LEN];
 			if (!(add_message_id(msg_cfg, vms->curdir, vms->curmsg,
 							filename, id, sizeof(id), vmu, mailbox_index))) {
 				ast_string_field_set(msg_snapshot, msg_id, id);
@@ -14972,8 +14991,9 @@ static struct ast_vm_mailbox_snapshot *vm_mailbox_snapshot_create(const char *ma
 	int i;
 	int this_index_only = -1;
 	int open = 0;
-	int inbox_index = 0;
-	int old_index = 1;
+	int inbox_index = get_folder_by_name("INBOX");
+	int old_index = get_folder_by_name("Old");
+	int urgent_index = get_folder_by_name("Urgent");
 
 	if (ast_strlen_zero(mailbox)) {
 		ast_log(LOG_WARNING, "Cannot create a mailbox snapshot since no mailbox was specified\n");
@@ -15014,17 +15034,20 @@ static struct ast_vm_mailbox_snapshot *vm_mailbox_snapshot_create(const char *ma
 	mailbox_snapshot->folders = ARRAY_LEN(mailbox_folders);
 
 	for (i = 0; i < mailbox_snapshot->folders; i++) {
-		int combining_old = 0;
-		if ((i == old_index) && (combine_INBOX_and_OLD)) {
-			combining_old = 1;
+		int msg_folder_index = i;
+
+		/* We want this message in the snapshot if any of the following:
+		 *   No folder was specified.
+		 *   The specified folder matches the current folder.
+		 *   The specified folder is INBOX AND we were asked to combine messages AND the current folder is either Old or Urgent.
+		 */
+		if (!(this_index_only == -1 || this_index_only == i || (this_index_only == inbox_index && combine_INBOX_and_OLD && (i == old_index || i == urgent_index)))) {
+			continue;
 		}
 
-		/* This if statement is confusing looking.  Here is what it means in english.
-		 * - If a folder is given to the function and that folder's index is not the one we are iterating over, skip it...
-		 * - Unless the folder provided is the INBOX folder and the current index is the OLD folder and we are combining OLD and INBOX msgs.
-		 */
-		if ((this_index_only != -1) && (this_index_only != i) && !(combining_old && i == old_index && this_index_only == inbox_index)) {
-			continue;
+		/* Make sure that Old or Urgent messages are marked as being in INBOX. */
+		if (combine_INBOX_and_OLD && (i == old_index || i == urgent_index)) {
+			msg_folder_index = inbox_index;
 		}
 
 		memset(&vms, 0, sizeof(vms));
@@ -15041,7 +15064,7 @@ static struct ast_vm_mailbox_snapshot *vm_mailbox_snapshot_create(const char *ma
 
 		/* Iterate through each msg, storing off info */
 		if (vms.lastmsg != -1) {
-			if ((vm_msg_snapshot_create(vmu, &vms, mailbox_snapshot, combining_old ? inbox_index : i, i, descending, sort_val))) {
+			if ((vm_msg_snapshot_create(vmu, &vms, mailbox_snapshot, msg_folder_index, i, descending, sort_val))) {
 				ast_log(LOG_WARNING, "Failed to create msg snapshots for %s@%s\n", mailbox, context);
 				goto snapshot_cleanup;
 			}

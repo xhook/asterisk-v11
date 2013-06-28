@@ -71,13 +71,6 @@ monitor-type = MixMonitor
 ;
 ;log_membername_as_agent = no
 ;
-; app_queue allows calls to members in a "Unknown" state to be treated as available
-; setting check_state_unknown = yes will cause app_queue to query the channel driver
-; to better determine the state this only applies to queues with ringinuse set
-; appropriately.
-;
-;check_state_unknown = no
-;
 ;[markq]
 ;
 ; A sample call queue
@@ -323,6 +316,13 @@ monitor-type = MixMonitor
 ; will have their position announced.
 ;
 ;announce-position = yes
+;
+; If enabled, play announcements to the first user waiting in the Queue. This may mean
+; that announcements are played when an agent attempts to connect to the waiting user,
+; which may delay the time before the agent and the user can communicate. Disabled by
+; default.
+;
+; announce-to-first-user = no
 ;
 ; If you have specified "limit" or "more" for the announce-position option, then the following
 ; value is what is used to determine what announcement to play to waiting callers. If you have

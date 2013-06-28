@@ -32,6 +32,8 @@
 
 ASTERISK_FILE_VERSION(__FILE__, "$Revision$")
 
+/* #define  REF_DEBUG 1 */
+
 #include "include/sip.h"
 #include "include/security_events.h"
 
@@ -338,9 +340,6 @@ int sip_report_security_event(const struct sip_pvt *p, const struct sip_request 
 		break;
 	case AUTH_NOT_FOUND:
 		/* with sip_cfg.alwaysauthreject on, generates 2 events */
-		sip_report_invalid_peer(p);
-		break;
-	case AUTH_FAKE_AUTH:
 		sip_report_invalid_peer(p);
 		break;
 	case AUTH_UNKNOWN_DOMAIN:

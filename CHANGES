@@ -11,6 +11,15 @@
 --- Functionality changes from Asterisk 10 to Asterisk 11 --------------------
 ------------------------------------------------------------------------------
 
+App_queue
+---------
+ * App_queue will now play periodic announcements for the caller that
+   holds the first position in the queue while waiting for answer.
+
+------------------------------------------------------------------------------
+--- Functionality changes since Asterisk 1.8.12.0 ----------------------------
+------------------------------------------------------------------------------
+
 Build System
 -------------------
  * The Asterisk build system will now build and install a shared library
@@ -306,6 +315,9 @@ chan_sip
    which set the force_rport and comedia options automatically if Asterisk
    detects that an incoming SIP request crossed a NAT after being sent by
    the remote endpoint.
+
+ * The default global nat setting in sip.conf has been changed from force_rport
+   to auto_force_rport.
 
  * NAT settings are now a combinable list of options. The equivalent of the
    deprecated nat=yes is nat=force_rport,comedia. nat=no behaves as before.
@@ -901,8 +913,6 @@ Queue changes
  * Added member option ignorebusy this when set and ringinuse is not
    will allow per member control of multiple calls as ringinuse does for
    the Queue.
- * Added global option check_state_unknown to enforce checking of device state
-   when the device state is unknown app_queue will see unknown as available.
 
 Applications
 ------------

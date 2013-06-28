@@ -290,6 +290,20 @@ char *ast_uri_encode(const char *string, char *outbuf, int buflen, struct ast_fl
  */
 void ast_uri_decode(char *s, struct ast_flags spec);
 
+/*! ast_xml_escape
+	\brief Escape reserved characters for use in XML.
+
+	If \a outbuf is too short, the output string will be truncated.
+	Regardless, the output will always be null terminated.
+
+	\param string String to be converted
+	\param outbuf Resulting encoded string
+	\param buflen Size of output buffer
+	\return 0 for success
+	\return -1 if buflen is too short.
+ */
+int ast_xml_escape(const char *string, char *outbuf, size_t buflen);
+
 /*!
  * \brief Escape characters found in a quoted string.
  *
@@ -310,8 +324,8 @@ static force_inline void ast_slinear_saturated_add(short *input, short *value)
 	res = (int) *input + *value;
 	if (res > 32767)
 		*input = 32767;
-	else if (res < -32767)
-		*input = -32767;
+	else if (res < -32768)
+		*input = -32768;
 	else
 		*input = (short) res;
 }
@@ -323,8 +337,8 @@ static force_inline void ast_slinear_saturated_subtract(short *input, short *val
 	res = (int) *input - *value;
 	if (res > 32767)
 		*input = 32767;
-	else if (res < -32767)
-		*input = -32767;
+	else if (res < -32768)
+		*input = -32768;
 	else
 		*input = (short) res;
 }
@@ -336,8 +350,8 @@ static force_inline void ast_slinear_saturated_multiply(short *input, short *val
 	res = (int) *input * *value;
 	if (res > 32767)
 		*input = 32767;
-	else if (res < -32767)
-		*input = -32767;
+	else if (res < -32768)
+		*input = -32768;
 	else
 		*input = (short) res;
 }

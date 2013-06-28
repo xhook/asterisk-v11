@@ -178,7 +178,7 @@ case "${host_os}" in
      OSARCH=cygwin
      PBX_WINARCH=1
      ;;
-     linux-gnueabi)
+     linux-gnueabi* |  linux-gnuspe)
      OSARCH=linux-gnu
      ;;
      kfreebsd*-gnu)
@@ -467,6 +467,7 @@ AST_EXT_LIB_SETUP_DEPENDENT([SPEEX_PREPROCESS], [speex_preprocess_ctl], [], [spe
 AST_EXT_LIB_SETUP([SQLITE], [SQLite], [sqlite])
 AST_EXT_LIB_SETUP([SQLITE3], [SQLite], [sqlite3])
 AST_EXT_LIB_SETUP([SRTP], [Secure RTP], [srtp])
+AST_EXT_LIB_SETUP_OPTIONAL([SRTP_SHUTDOWN], [SRTP Library Shutdown Function], [SRTP], [srtp])
 AST_EXT_LIB_SETUP([OPENSSL], [OpenSSL Secure Sockets Layer], [ssl])
 AST_EXT_LIB_SETUP([SUPPSERV], [mISDN Supplemental Services], [suppserv])
 AST_EXT_LIB_SETUP([FREETDS], [FreeTDS], [tds])
@@ -475,6 +476,7 @@ AST_EXT_LIB_SETUP([TIMERFD], [timerfd], [timerfd])
 AST_EXT_LIB_SETUP([TINFO], [Term Info], [tinfo])
 AST_EXT_LIB_SETUP([TONEZONE], [tonezone], [tonezone])
 AST_EXT_LIB_SETUP([UNIXODBC], [unixODBC], [unixodbc])
+AST_EXT_LIB_SETUP([UUID], [UUID], [uuid])
 AST_EXT_LIB_SETUP([VORBIS], [Vorbis], [vorbis])
 AST_EXT_LIB_SETUP([VPB], [Voicetronix API], [vpb])
 AST_EXT_LIB_SETUP([X11], [X11], [x11])
@@ -591,7 +593,7 @@ AC_CHECK_FUNCS([asprintf atexit closefrom dup2 eaccess endpwent euidaccess ffsll
 # so that AC_CHECK_FUNCS can detect functions in that library.
 AC_CHECK_LIB([m], [sqrt])
 # BSD might not have exp2, and/or log2
-AC_CHECK_FUNCS([exp2 log2 exp10 log10 sin cos tan asin acos atan atan2 pow rint exp log remainder fmod round trunc floor ceil])
+AC_CHECK_FUNCS([exp2 log2 exp10 log10 sin cos tan asin acos atan atan2 pow rint exp log remainder fmod round roundf trunc floor ceil])
 
 # Certain architectures don't really have long double, even though
 # AC_CHECK_FUNCS would otherwise find the following functions.
@@ -1052,6 +1054,38 @@ AC_COMPILE_IFELSE(
 	[AST_NESTED_FUNCTIONS=-fnested-functions]
 )
 AC_SUBST(AST_NESTED_FUNCTIONS)
+
+dnl Check to see if rpath should be set in LDFLAGS
+AC_ARG_ENABLE(rpath,
+	[AC_HELP_STRING([--disable-rpath],
+			[Disables rpath linker option checking])],
+	[case "${enableval}" in
+		y|ye|yes) check_rpath=yes ;;
+		n|no) check_rpath=no ;;
+                *) AC_MSG_ERROR(bad value ${enableval} for --disable-rpath) ;;
+	esac], [check_rpath=yes])
+
+AC_MSG_CHECKING(whether to use rpath)
+AST_RPATH=
+if test "${check_rpath}" != yes; then
+	AC_MSG_RESULT(skipped)
+elif test "${prefix}" = /usr || test "${prefix}" = NONE; then
+	AC_MSG_RESULT(not needed)
+else
+	case "${host_os}" in
+		darwin*)
+			AC_MSG_RESULT(not supported)
+			# We set macosx_version_min to 10.4, which doesn't
+			# support rpath. However, we set install_name on our
+			# dylibs, so it's not strictly necessary.
+			;;
+		*)
+			AC_MSG_RESULT(required)
+			AST_RPATH="-Wl,-rpath,${libdir}"
+			;;
+	esac
+fi
+AC_SUBST(AST_RPATH)
 
 AC_MSG_CHECKING(for sysinfo)
 AC_LINK_IFELSE(
@@ -2151,6 +2185,7 @@ then
     CFLAGS="${saved_cflags}"
 fi
 
+AST_EXT_LIB_CHECK([SRTP_SHUTDOWN], [srtp], [srtp_shutdown], [srtp/srtp.h])
 
 for ver in 2.0 2.2 2.4 2.6; do
 	AST_PKG_CONFIG_CHECK([GMIME], gmime-$ver)
@@ -2170,6 +2205,8 @@ if test "${tonezone_does_not_need_lm}" = "no" ; then
 fi
 
 AST_EXT_LIB_CHECK([TONEZONE], [tonezone], [tone_zone_find], [dahdi/tonezone.h], [${tonezone_extra} ${DAHDI_INCLUDE}])
+
+AST_EXT_LIB_CHECK([UUID], [uuid], [uuid_generate_random], [uuid/uuid.h])
 
 if test "${OSARCH}" = "OpenBSD";
 then
@@ -2274,7 +2311,9 @@ PBX_LAUNCHD=0
 if test "${cross_compiling}" = "no";
 then
   AC_CHECK_FILE(/sbin/launchd, AC_DEFINE([HAVE_SBIN_LAUNCHD], 1, [Define to 1 if your system has /sbin/launchd.]))
-  PBX_LAUNCHD=1
+  if test "${HAVE_SBIN_LAUNCHD}" = 1; then
+    PBX_LAUNCHD=1
+  fi
 fi
 AC_SUBST(PBX_LAUNCHD)
 

@@ -1,0 +1,103 @@
+; "setvar" to set variables that can be used in the dialplan for various limits.
+
+[general]
+context=public                  ; Default context for incoming calls. Defaults to 'default'
+;allowguest=yes                 ; Allow or reject guest calls (default is yes)
+				; If your Asterisk is connected to the Internet
+				; and you have allowguest=yes
+				; you want to check which services you offer everyone
+				; out there, by enabling them in the default context (see below).
+;match_auth_username=yes        ; if available, match user entry using the
+                                ; 'username' field from the authentication line
+                                ; instead of the From: field.
+;allowoverlap=no                 ; Disable overlap dialing support. (Default is yes)
+;allowoverlap=yes               ; Enable RFC3578 overlap dialing support.
+                                ; Can use the Incomplete application to collect the
+                                ; needed digits from an ambiguous dialplan match.
+;allowoverlap=dtmf              ; Enable overlap dialing support using DTMF delivery
+                                ; methods (inband, RFC2833, SIP INFO) in the early
+                                ; media phase.  Uses the Incomplete application to
+                                ; collect the needed digits.
+;allowtransfer=no               ; Disable all transfers (unless enabled in peers or users)
+                                ; Default is enabled. The Dial() options 't' and 'T' are not
+                                ; related as to whether SIP transfers are allowed or not.
+;realm=mydomain.tld             ; Realm for digest authentication
+                                ; defaults to "asterisk". If you set a system name in
+                                ; asterisk.conf, it defaults to that system name
+                                ; Realms MUST be globally unique according to RFC 3261
+                                ; Set this to your host name or domain name
+;domainsasrealm=no              ; Use domains list as realms
+                                ; You can serve multiple Realms specifying several
+                                ; 'domain=...' directives (see below).
+                                ; In this case Realm will be based on request 'From'/'To' header
+                                ; and should match one of domain names.
+                                ; Otherwise default 'realm=...' will be used.
+;recordonfeature=automixmon	; Default feature to use when receiving 'Record: on' header
+				; from an INFO message. Defaults to 'automon'. Works with
+				; dynamic features. Feature must be usable on requesting
+				; channel for it to work. Setting this value to a blank
+				; will disable it.
+;recordofffeature=automixmon	; Default feature to use when receiving 'Record: off' header
+				; from an INFO message. Defaults to 'automon'. Works with
+				; dynamic features. Feature must be usable on requesting
+				; channel for it to work. Setting this value to a blank
+				; will disable it.
+
+; With the current situation, you can do one of four things:
+;  a) Listen on a specific IPv4 address.      Example: bindaddr=192.0.2.1
+;  b) Listen on a specific IPv6 address.      Example: bindaddr=2001:db8::1
+;  c) Listen on the IPv4 wildcard.            Example: bindaddr=0.0.0.0
+;  d) Listen on the IPv4 and IPv6 wildcards.  Example: bindaddr=::
+; (You can choose independently for UDP, TCP, and TLS, by specifying different values for
+; "udpbindaddr", "tcpbindaddr", and "tlsbindaddr".)
+; (Note that using bindaddr=:: will show only a single IPv6 socket in netstat.
+;  IPv4 is supported at the same time using IPv4-mapped IPv6 addresses.)
+;
+; You may optionally add a port number. (The default is port 5060 for UDP and TCP, 5061
+; for TLS).
+;   IPv4 example: bindaddr=0.0.0.0:5062
+;   IPv6 example: bindaddr=[::]:5062
+;
+; The address family of the bound UDP address is used to determine how Asterisk performs
+; DNS lookups. In cases a) and c) above, only A records are considered. In case b), only
+; AAAA records are considered. In case d), both A and AAAA records are considered. Note,
+; however, that Asterisk ignores all records except the first one. In case d), when both A
+; and AAAA records are available, either an A or AAAA record will be first, and which one
+; depends on the operating system. On systems using glibc, AAAA records are given
+; priority.
+
+rtptimeout=10
+rtpholdtimeout=300
+
+udpbindaddr=<%= @udpbindaddr %>
+
+tlsenable=yes
+tlsbindaddr=<%= @tlsbindaddr %>
+tlscertfile=<%= @tlscertfile %>
+tlscafile=<%= @tlscafile %>
+tlscipher=ALL
+tlsclientmethod=tlsv1
+srvlookup=yes
+allowguest=yes
+allowexternalinvites=yes
+allowsubscribe=yes
+autodomain=yes
+callevents=yes
+
+realm=<%= @realm %>
+domainsasrealm=<%= @domainsasrealm %>
+directmedia=no
+encryption=yes
+transport=tls,udp,ws,wss
+nat=yes
+insecure=port,invite
+externip=<%= @externip %>
+localnet=<%= @localnet %>
+avpf=yes
+icesupport=yes
+
+disallow=all
+allow=opus
+allow=g722
+allow=ulaw
+

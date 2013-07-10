@@ -87,13 +87,13 @@ struct opus_coder_pvt {
 
 /* Helper methods */
 static int opus_encoder_construct(struct ast_trans_pvt *pvt, int sampling_rate) {
+	struct opus_coder_pvt *opvt = pvt->pvt;
+	int error = 0;
 	if(sampling_rate != 8000 && sampling_rate != 12000 && sampling_rate != 16000 && sampling_rate != 24000 && sampling_rate != 48000)
 		return -1;
-	struct opus_coder_pvt *opvt = pvt->pvt;
 	opvt->sampling_rate = sampling_rate;
 	opvt->multiplier = 48000/sampling_rate;
 	opvt->fec = USE_FEC;
-	int error = 0;
 	opvt->opus = opus_encoder_create(sampling_rate, 1, OPUS_APPLICATION_VOIP, &error);
 	if(error != OPUS_OK) {
 		if(opusdebug)
@@ -120,13 +120,13 @@ static int opus_encoder_construct(struct ast_trans_pvt *pvt, int sampling_rate) 
 }
 
 static int opus_decoder_construct(struct ast_trans_pvt *pvt, int sampling_rate) {
+	struct opus_coder_pvt *opvt = pvt->pvt;
+	int error = 0;
 	if(sampling_rate != 8000 && sampling_rate != 12000 && sampling_rate != 16000 && sampling_rate != 24000 && sampling_rate != 48000)
 		return -1;
-	struct opus_coder_pvt *opvt = pvt->pvt;
 	opvt->sampling_rate = sampling_rate;
 	opvt->multiplier = 48000/sampling_rate;
 	opvt->fec = USE_FEC;	/* FIXME: should be triggered by chan_sip */
-	int error = 0;
 	opvt->opus = opus_decoder_create(sampling_rate, 1, &error);
 	if(error != OPUS_OK) {
 		if(opusdebug)
@@ -201,13 +201,12 @@ static int lintoopus_framein(struct ast_trans_pvt *pvt, struct ast_frame *f) {
 
 static struct ast_frame *lintoopus_frameout(struct ast_trans_pvt *pvt) {
 	struct opus_coder_pvt *opvt = pvt->pvt;
+	int datalen = 0;	/* output bytes */
+	int samples = 0;	/* output samples */
 
 	/* We can't work on anything less than a frame in size */
 	if (pvt->samples < opvt->framesize)
 		return NULL;
-		
-	int datalen = 0;	/* output bytes */
-	int samples = 0;	/* output samples */
 
 	/* Encode 160 samples (or more if it's not narrowband) */
 	if(opusdebug > 1)
@@ -235,10 +234,11 @@ static struct ast_frame *lintoopus_frameout(struct ast_trans_pvt *pvt) {
 
 static int opustolin_framein(struct ast_trans_pvt *pvt, struct ast_frame *f) {
 	struct opus_coder_pvt *opvt = pvt->pvt;
+  int error = 0;
 	/* Decode */
 	if(opusdebug > 1)
 		ast_verbose("[Opus] [Decoder #%d (%d)] %d samples, %d bytes\n", opvt->id, opvt->sampling_rate, f->samples, f->datalen);
-	int error = opus_decode(opvt->opus, f->data.ptr, f->datalen, pvt->outbuf.i16, BUFFER_SAMPLES, opvt->fec);
+	error = opus_decode(opvt->opus, f->data.ptr, f->datalen, pvt->outbuf.i16, BUFFER_SAMPLES, opvt->fec);
 	if(error < 0) {
 		if(opusdebug)
 			ast_verbose("[Opus] Ops! got an error decoding the Opus frame: %d (%s)\n", error, opus_strerror(error));

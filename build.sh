@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/bash -x
 
 if [ -z "$1" ]
 then
@@ -28,7 +28,7 @@ LDFLAGS="-Wl,-rpath,this_rpath_will_be_rplaced_by_chrpath_tool" CFLAGS=$CFLAGS C
     --with-opus=$PWD/third_party/opus/build &&
   make && 
   make install &&
-  chrpath -r '$ORIGIN/../lib' $INSTALL_DIR/sbin/asterisk
+  chrpath -r '$ORIGIN/../lib' $INSTALL_DIR/sbin/asterisk || exit 1
 
 cd ./third_party/appkonference
 ./build.sh \

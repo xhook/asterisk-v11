@@ -1006,6 +1006,8 @@ static int speex_samples(unsigned char *data, int len)
 static int opus_samples(unsigned char *data, int len) {
 	/* Do opus_packet_get_nb_frames first */
 	int count, frames;
+  int audiosize, Fs = 48000;
+
 	if (len<1) {
 		return 0;	/* FIXME OPUS_BAD_ARG */
 	} else {
@@ -1020,7 +1022,6 @@ static int opus_samples(unsigned char *data, int len) {
 			frames = data[1]&0x3F;
 	}
 	/* The, do a opus_packet_get_samples_per_frame */
-   int audiosize, Fs = 48000;
    if (data[0]&0x80) {
       audiosize = ((data[0]>>3)&0x3);
       audiosize = (Fs<<audiosize)/400;

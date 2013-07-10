@@ -2625,12 +2625,15 @@ static int ast_rtp_write(struct ast_rtp_instance *instance, struct ast_frame *fr
 
 	/* VP8: is this a request to send a RTCP FIR? */
 	if(frame->frametype == AST_FRAME_CONTROL && frame->subclass.integer == AST_CONTROL_VIDUPDATE) {
-		ast_log(LOG_WARNING, "res_rtp_asterisk, requested to send a RTCP FIR packet to the peer\n");
-		struct ast_rtp *rtp = ast_rtp_instance_get_data(instance);
-		if (!rtp || !rtp->rtcp)
-			return 0;
 		unsigned int *rtcpheader;
 		char bdata[1024];
+		int len = 20;
+		int ice, res;
+		
+    ast_log(LOG_WARNING, "res_rtp_asterisk, requested to send a RTCP FIR packet to the peer\n");
+		rtp = ast_rtp_instance_get_data(instance);
+		if (!rtp || !rtp->rtcp)
+			return 0;
 		if (ast_sockaddr_isnull(&rtp->rtcp->them)) {
 			/*
 			 * RTCP was stopped.
@@ -2641,15 +2644,13 @@ static int ast_rtp_write(struct ast_rtp_instance *instance, struct ast_frame *fr
 		rtp->rtcp->firseq++;
 		if(rtp->rtcp->firseq == 256)
 			rtp->rtcp->firseq = 0;
-		int len = 20;
-		int ice;
 		rtcpheader = (unsigned int *)bdata;
 		rtcpheader[0] = htonl((2 << 30) | (4 << 24) | (RTCP_PT_PSFB << 16) | ((len/4)-1));
 		rtcpheader[1] = htonl(rtp->ssrc);
 		rtcpheader[2] = htonl(rtp->themssrc);
 		rtcpheader[3] = htonl(rtp->themssrc);	/* FCI: SSRC */
 		rtcpheader[4] = htonl(rtp->rtcp->firseq << 24);			/* FCI: Sequence number */
-		int res = rtcp_sendto(instance, (unsigned int *)rtcpheader, len, 0, &rtp->rtcp->them, &ice);
+		res = rtcp_sendto(instance, (unsigned int *)rtcpheader, len, 0, &rtp->rtcp->them, &ice);
 		if (res < 0) {
 			ast_log(LOG_ERROR, "RTCP FIR transmission error: %s\n",strerror(errno));
 			return 0;

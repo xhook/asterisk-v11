@@ -7794,13 +7794,13 @@ static int sip_indicate(struct ast_channel *ast, int condition, const void *data
 			/* Only use this for WebRTC users */
 			struct ast_format_cap *fcap = ast_channel_nativeformats(ast);
 			struct ast_format vp8;
+			struct ast_frame fr;
 			ast_format_set(&vp8, AST_FORMAT_VP8, 0);
 			if(ast_format_cap_iscompatible(fcap, &vp8)) {
 				sip_pvt_lock(p);
 				if (p->vrtp) {
 					ast_log(LOG_WARNING, "chan_sip, sending RTCP FIR to WebRTC user\n");
 					/* FIXME Fake RTP write, this will be sent as an RTCP packet */
-					struct ast_frame fr;
 					fr.frametype = AST_FRAME_CONTROL;
 					fr.subclass.integer = AST_CONTROL_VIDUPDATE;
 					res = ast_rtp_instance_write(p->vrtp, &fr);
@@ -32045,6 +32045,8 @@ static int reload_config(enum channelreloadreason reason)
 			}
 		} else if (!strcasecmp(v->name, "snom_aoc_enabled")) {
 			ast_set2_flag(&global_flags[2], ast_true(v->value), SIP_PAGE3_SNOM_AOC);
+		} else if (!strcasecmp(v->name, "avpf")) {
+			ast_set2_flag(&global_flags[2], ast_true(v->value), SIP_PAGE3_USE_AVPF);
 		} else if (!strcasecmp(v->name, "icesupport")) {
 			ast_set2_flag(&global_flags[2], ast_true(v->value), SIP_PAGE3_ICE_SUPPORT);
 		} else if (!strcasecmp(v->name, "parkinglot")) {

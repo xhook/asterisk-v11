@@ -10,3 +10,4 @@ aclocal.m4
 autom4te.cache/
 include/asterisk/autoconfig.h.in~
 
+!etc/init.d

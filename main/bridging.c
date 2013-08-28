@@ -299,6 +299,14 @@ void ast_bridge_handle_trip(struct ast_bridge *bridge, struct ast_bridge_channel
 			ast_bridge_change_state(bridge_channel, AST_BRIDGE_CHANNEL_STATE_END);
 		} else if (frame->frametype == AST_FRAME_CONTROL && bridge_drop_control_frame(frame->subclass.integer)) {
 			ast_debug(1, "Dropping control frame from bridge channel %p\n", bridge_channel);
+		} else if (frame->frametype == AST_FRAME_CONTROL &&
+				frame->subclass.integer == AST_CONTROL_VIDUPDATE &&
+				ast_format_cap_has_type(ast_channel_nativeformats(chan), AST_FORMAT_TYPE_VIDEO)) {
+			struct ast_bridge_video_talker_src_data *data;
+			ao2_lock(bridge);
+			data = &bridge->video_mode.mode_data.talker_src_data;
+			ast_indicate(data->chan_vsrc, AST_CONTROL_VIDUPDATE);
+			ao2_unlock(bridge);
 		} else if (frame->frametype == AST_FRAME_DTMF_BEGIN || frame->frametype == AST_FRAME_DTMF_END) {
 			int dtmf_passthrough = bridge_channel->features ?
 				bridge_channel->features->dtmf_passthrough :

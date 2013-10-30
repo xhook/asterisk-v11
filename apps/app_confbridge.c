@@ -654,7 +654,7 @@ static void send_conf_end_event(const char *conf_name)
 	manager_event(EVENT_FLAG_CALL, "ConfbridgeEnd", "Conference: %s\r\n", conf_name);
 }
 
-static void send_join_event(struct ast_channel *chan, const char *conf_name)
+static void send_join_event(struct ast_channel *chan, const char *conf_name, struct conference_bridge_user *participant)
 {
 	/*** DOCUMENTATION
 		<managerEventInstance>
@@ -673,12 +673,14 @@ static void send_join_event(struct ast_channel *chan, const char *conf_name)
 		"Uniqueid: %s\r\n"
 		"Conference: %s\r\n"
 		"CallerIDnum: %s\r\n"
-		"CallerIDname: %s\r\n",
+		"CallerIDname: %s\r\n"
+		"Marked: %s\r\n",
 		ast_channel_name(chan),
 		ast_channel_uniqueid(chan),
 		conf_name,
 		S_COR(ast_channel_caller(chan)->id.number.valid, ast_channel_caller(chan)->id.number.str, "<unknown>"),
-		S_COR(ast_channel_caller(chan)->id.name.valid, ast_channel_caller(chan)->id.name.str, "<unknown>")
+		S_COR(ast_channel_caller(chan)->id.name.valid, ast_channel_caller(chan)->id.name.str, "<unknown>"),
+		ast_test_flag(&participant->u_profile, USER_OPT_MARKEDUSER) ? "Yes" : "No"
 	);
 }
 
@@ -1196,6 +1198,7 @@ static struct conference_bridge *join_conference_bridge(const char *name, struct
 		if (ast_test_flag(&conference_bridge->b_profile, BRIDGE_OPT_VIDEO_SRC_FOLLOW_TALKER)) {
 			ast_bridge_set_talker_src_video_mode(conference_bridge->bridge);
 		}
+		//ast_bridge_set_single_src_video_mode(conference_bridge->bridge, conference_bridge_user->chan);
 
 		/* Link it into the conference bridges container */
 		if (!ao2_link(conference_bridges, conference_bridge)) {
@@ -1698,7 +1701,7 @@ static int confbridge_exec(struct ast_channel *chan, const char *data)
 	conf_moh_unsuspend(&conference_bridge_user);
 
 	/* Join our conference bridge for real */
-	send_join_event(conference_bridge_user.chan, conference_bridge->name);
+	send_join_event(conference_bridge_user.chan, conference_bridge->name, &conference_bridge_user);
 	ast_bridge_join(conference_bridge->bridge,
 		chan,
 		NULL,

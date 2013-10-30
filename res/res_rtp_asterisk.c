@@ -93,6 +93,7 @@ ASTERISK_FILE_VERSION(__FILE__, "$Revision$")
 #define RTCP_PT_BYE     203
 #define RTCP_PT_APP     204
 /* VP8: RTCP Feedback */
+#define RTCP_PT_RTPFB   205
 #define RTCP_PT_PSFB    206
 
 #define RTP_MTU		1200
@@ -2624,13 +2625,13 @@ static int ast_rtp_write(struct ast_rtp_instance *instance, struct ast_frame *fr
 	}
 
 	/* VP8: is this a request to send a RTCP FIR? */
-	if(frame->frametype == AST_FRAME_CONTROL && frame->subclass.integer == AST_CONTROL_VIDUPDATE) {
+	if (frame->frametype == AST_FRAME_CONTROL && frame->subclass.integer == AST_CONTROL_VIDUPDATE) {
 		unsigned int *rtcpheader;
 		char bdata[1024];
 		int len = 20;
 		int ice, res;
 		
-    ast_log(LOG_WARNING, "res_rtp_asterisk, requested to send a RTCP FIR packet to the peer\n");
+		ast_log(LOG_WARNING, "res_rtp_asterisk, requested to send a RTCP FIR packet to the peer\n");
 		rtp = ast_rtp_instance_get_data(instance);
 		if (!rtp || !rtp->rtcp)
 			return 0;
@@ -3370,6 +3371,8 @@ static struct ast_frame *ast_rtcp_read(struct ast_rtp_instance *instance)
 			}
 			break;
 		case RTCP_PT_FUR:
+		case RTCP_PT_RTPFB:  // TODO: In every unclear situation send FIR.
+		case RTCP_PT_PSFB:   //       In future follow RFC4585 here.
 			if (rtcp_debug_test_addr(&addr))
 				ast_verbose("Received an RTCP Fast Update Request\n");
 			rtp->f.frametype = AST_FRAME_CONTROL;
@@ -3391,8 +3394,8 @@ static struct ast_frame *ast_rtcp_read(struct ast_rtp_instance *instance)
 					    ast_sockaddr_stringify(&rtp->rtcp->them));
 			break;
 		default:
-			ast_debug(1, "Unknown RTCP packet (pt=%d) received from %s\n",
-				  pt, ast_sockaddr_stringify(&rtp->rtcp->them));
+			ast_debug(1, "Unknown RTCP packet (pt=%d, rc=%d) received from %s\n",
+				  pt, rc, ast_sockaddr_stringify(&rtp->rtcp->them));
 			break;
 		}
 		position += (length + 1);

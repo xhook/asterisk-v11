@@ -7799,7 +7799,7 @@ static int sip_indicate(struct ast_channel *ast, int condition, const void *data
 			if(ast_format_cap_iscompatible(fcap, &vp8)) {
 				sip_pvt_lock(p);
 				if (p->vrtp) {
-					ast_log(LOG_WARNING, "chan_sip, sending RTCP FIR to WebRTC user\n");
+					ast_log(LOG_WARNING, "chan_sip, sending RTCP FIR to WebRTC user (chan = %s)\n", ast_channel_name(ast));
 					/* FIXME Fake RTP write, this will be sent as an RTCP packet */
 					fr.frametype = AST_FRAME_CONTROL;
 					fr.subclass.integer = AST_CONTROL_VIDUPDATE;
@@ -12834,6 +12834,15 @@ static void add_vcodec_to_sdp(const struct sip_pvt *p, struct ast_format *format
 
 	ast_str_append(m_buf, 0, " %d", rtp_code);
 	ast_str_append(a_buf, 0, "a=rtpmap:%d %s/%d\r\n", rtp_code, subtype, rate);
+
+	if (format->id == AST_FORMAT_VP8) {
+		ast_str_append(a_buf, 0, "a=rtcp-fb:100 ccm fir\n");
+		// TODO: Add proper NACK support. Now we consider "nack" as "fir" and
+		//       send full intra-frame instead of retransmitting last packet.
+		ast_str_append(a_buf, 0, "a=rtcp-fb:100 nack\n");
+		// TODO: Add remb/goog-remb support http://tools.ietf.org/html/draft-alvestrand-rmcat-remb-02
+		// ast_str_append(a_buf, 0, "a=rtcp-fb:100 goog-remb");
+	}
 
 	ast_format_sdp_generate(format, rtp_code, a_buf);
 }

@@ -135,7 +135,6 @@ int ast_sockaddr_split_hostport(char *str, char **host, char **port, int flags)
 	char *orig_str = str;/* Original string in case the port presence is incorrect. */
 	char *host_end = NULL;/* Delay terminating the host in case the port presence is incorrect. */
 
-	ast_debug(5, "Splitting '%s' into...\n", str);
 	*host = NULL;
 	*port = NULL;
 	if (*s == '[') {
@@ -189,7 +188,7 @@ int ast_sockaddr_split_hostport(char *str, char **host, char **port, int flags)
 	if (host_end) {
 		*host_end = '\0';
 	}
-	ast_debug(5, "...host '%s' and port '%s'.\n", *host, *port ? *port : "");
+
 	return 1;
 }
 

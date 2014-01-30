@@ -369,7 +369,11 @@ enum ast_rtp_dtls_connection {
 
 /*! \brief DTLS fingerprint hashes */
 enum ast_rtp_dtls_hash {
+	AST_RTP_DTLS_HASH_NONE, /* Uninitialized */
 	AST_RTP_DTLS_HASH_SHA1, /*!< SHA-1 fingerprint hash */
+	/*SRTP_DTLS */
+	AST_RTP_DTLS_HASH_SHA256, /*!< SHA-256 fingerprint hash */
+	/*SRTP_DTLS */
 };
 
 /*! \brief DTLS configuration structure */
@@ -405,7 +409,7 @@ struct ast_rtp_engine_dtls {
 	/*! Set the remote fingerprint */
 	void (*set_fingerprint)(struct ast_rtp_instance *instance, enum ast_rtp_dtls_hash hash, const char *fingerprint);
 	/*! Get the local fingerprint */
-	const char *(*get_fingerprint)(struct ast_rtp_instance *instance, enum ast_rtp_dtls_hash hash);
+	const char *(*get_fingerprint)(struct ast_rtp_instance *instance, const struct ast_rtp_dtls_cfg *dtls_cfg, enum ast_rtp_dtls_hash hash);
 };
 
 /*! Structure that represents an RTP stack (engine) */

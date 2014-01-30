@@ -1400,7 +1400,7 @@ static int process_sdp_a_video(const char *a, struct sip_pvt *p, struct ast_rtp_
 static int process_sdp_a_text(const char *a, struct sip_pvt *p, struct ast_rtp_codecs *newtextrtp, char *red_fmtp, int *red_num_gen, int *red_data_pt, int *last_rtpmap_codec);
 static int process_sdp_a_image(const char *a, struct sip_pvt *p);
 static void add_ice_to_sdp(struct ast_rtp_instance *instance, struct ast_str **a_buf);
-static void add_dtls_to_sdp(struct ast_rtp_instance *instance, struct ast_str **a_buf);
+static void add_dtls_to_sdp(struct ast_rtp_instance *instance, const struct sip_pvt *dialog, struct ast_str **a_buf);
 static void start_ice(struct ast_rtp_instance *instance);
 static void add_codec_to_sdp(const struct sip_pvt *p, struct ast_format *codec,
 			     struct ast_str **m_buf, struct ast_str **a_buf,
@@ -5888,10 +5888,6 @@ static int dialog_initialize_rtp(struct sip_pvt *dialog)
 		ice->stop(dialog->rtp);
 	}
 
-	if (dialog_initialize_dtls_srtp(dialog, dialog->rtp, &dialog->srtp)) {
-		return -1;
-	}
-
 	if (ast_test_flag(&dialog->flags[1], SIP_PAGE2_VIDEOSUPPORT_ALWAYS) ||
 			(ast_test_flag(&dialog->flags[1], SIP_PAGE2_VIDEOSUPPORT) && (ast_format_cap_has_type(dialog->caps, AST_FORMAT_TYPE_VIDEO)))) {
 		if (!(dialog->vrtp = ast_rtp_instance_new(dialog->engine, sched, &bindaddr_tmp, NULL))) {
@@ -5902,16 +5898,16 @@ static int dialog_initialize_rtp(struct sip_pvt *dialog)
 			ice->stop(dialog->vrtp);
 		}
 
-		if (dialog_initialize_dtls_srtp(dialog, dialog->vrtp, &dialog->vsrtp)) {
-			return -1;
-		}
-
 		ast_rtp_instance_set_timeout(dialog->vrtp, dialog->rtptimeout);
 		ast_rtp_instance_set_hold_timeout(dialog->vrtp, dialog->rtpholdtimeout);
 		ast_rtp_instance_set_keepalive(dialog->vrtp, dialog->rtpkeepalive);
 
 		ast_rtp_instance_set_prop(dialog->vrtp, AST_RTP_PROPERTY_RTCP, 1);
 		ast_rtp_instance_set_qos(dialog->vrtp, global_tos_video, global_cos_video, "SIP VIDEO");
+
+		if (dialog_initialize_dtls_srtp(dialog, dialog->vrtp, &dialog->vsrtp)) {
+			return -1;
+		}
 	}
 
 	if (ast_test_flag(&dialog->flags[1], SIP_PAGE2_TEXTSUPPORT)) {
@@ -5923,14 +5919,14 @@ static int dialog_initialize_rtp(struct sip_pvt *dialog)
 			ice->stop(dialog->trtp);
 		}
 
-		if (dialog_initialize_dtls_srtp(dialog, dialog->trtp, &dialog->tsrtp)) {
-			return -1;
-		}
-
 		/* Do not timeout text as its not constant*/
 		ast_rtp_instance_set_keepalive(dialog->trtp, dialog->rtpkeepalive);
 
 		ast_rtp_instance_set_prop(dialog->trtp, AST_RTP_PROPERTY_RTCP, 1);
+
+		if (dialog_initialize_dtls_srtp(dialog, dialog->vrtp, &dialog->vsrtp)) {
+			return -1;
+		}
 	}
 
 	ast_rtp_instance_set_timeout(dialog->rtp, dialog->rtptimeout);
@@ -5940,6 +5936,10 @@ static int dialog_initialize_rtp(struct sip_pvt *dialog)
 	ast_rtp_instance_set_prop(dialog->rtp, AST_RTP_PROPERTY_RTCP, 1);
 	ast_rtp_instance_set_prop(dialog->rtp, AST_RTP_PROPERTY_DTMF, ast_test_flag(&dialog->flags[0], SIP_DTMF) == SIP_DTMF_RFC2833);
 	ast_rtp_instance_set_prop(dialog->rtp, AST_RTP_PROPERTY_DTMF_COMPENSATE, ast_test_flag(&dialog->flags[1], SIP_PAGE2_RFC2833_COMPENSATE));
+
+	if (dialog_initialize_dtls_srtp(dialog, dialog->rtp, &dialog->srtp)) {
+		return -1;
+	}
 
 	ast_rtp_instance_set_qos(dialog->rtp, global_tos_audio, global_cos_audio, "SIP RTP");
 
@@ -9953,6 +9953,7 @@ static int process_sdp(struct sip_pvt *p, struct sip_request *req, int t38action
 	/* SRTP */
 	int secure_audio = FALSE;
 	int secure_video = FALSE;
+	int processed_dtls = FALSE;
 
 	/* Others */
 	int sendonly = -1;
@@ -10045,12 +10046,15 @@ static int process_sdp(struct sip_pvt *p, struct sip_request *req, int t38action
 			}
 
 			if (process_sdp_a_dtls(value, p, p->rtp)) {
+				processed_dtls = TRUE;
 				processed = TRUE;
 			}
 			if (process_sdp_a_dtls(value, p, p->vrtp)) {
+				processed_dtls = TRUE;
 				processed = TRUE;
 			}
 			if (process_sdp_a_dtls(value, p, p->trtp)) {
+				processed_dtls = TRUE;
 				processed = TRUE;
 			}
 
@@ -10128,7 +10132,6 @@ static int process_sdp(struct sip_pvt *p, struct sip_request *req, int t38action
 					continue;
 				} else if (!strcmp(protocol, "UDP/TLS/RTP/SAVP") || !strcmp(protocol, "UDP/TLS/RTP/SAVPF")) {
 					secure_audio = 1;
-
 					if (p->srtp) {
 						ast_set_flag(p->srtp, SRTP_CRYPTO_OFFER_OK);
 					}
@@ -10419,6 +10422,7 @@ static int process_sdp(struct sip_pvt *p, struct sip_request *req, int t38action
 						processed = TRUE;
 					} else if (process_sdp_a_dtls(value, p, p->rtp)) {
 						processed = TRUE;
+						processed_dtls = TRUE;
 					} else if (process_sdp_a_sendonly(value, &sendonly)) {
 						processed = TRUE;
 					} else if (!processed_crypto && process_crypto(p, p->rtp, &p->srtp, value)) {
@@ -10434,6 +10438,7 @@ static int process_sdp(struct sip_pvt *p, struct sip_request *req, int t38action
 						processed = TRUE;
 					} else if (process_sdp_a_dtls(value, p, p->vrtp)) {
 						processed = TRUE;
+						processed_dtls = TRUE;
 					} else if (!processed_crypto && process_crypto(p, p->vrtp, &p->vsrtp, value)) {
 						processed_crypto = TRUE;
 						processed = TRUE;
@@ -10467,10 +10472,11 @@ static int process_sdp(struct sip_pvt *p, struct sip_request *req, int t38action
 		}
 
 		/* Ensure crypto lines are provided where necessary */
-		if (audio && secure_audio && !processed_crypto) {
+		ast_log(LOG_WARNING, "Processed DTLS [%s] \n", processed_dtls ? "TRUE" : "FALSE");
+		if (audio && secure_audio && !(processed_crypto || processed_dtls)) {
 			ast_log(LOG_WARNING, "Rejecting secure audio stream without encryption details: %s\n", m);
 			return -1;
-		} else if (video && secure_video && !processed_crypto) {
+		} else if (video && secure_video && !(processed_crypto || processed_dtls)) {
 			ast_log(LOG_WARNING, "Rejecting secure video stream without encryption details: %s\n", m);
 			return -1;
 		}
@@ -10977,7 +10983,8 @@ static int process_sdp_a_dtls(const char *a, struct sip_pvt *p, struct ast_rtp_i
 {
 	struct ast_rtp_engine_dtls *dtls;
 	int found = FALSE;
-	char value[256], hash[6];
+	int found_setup = FALSE;
+	char value[256], hash[8];
 
 	if (!instance || !p->dtls_cfg.enabled || !(dtls = ast_rtp_instance_get_dtls(instance))) {
 		return found;
@@ -10985,7 +10992,7 @@ static int process_sdp_a_dtls(const char *a, struct sip_pvt *p, struct ast_rtp_i
 
 	if (sscanf(a, "setup: %255s", value) == 1) {
 		found = TRUE;
-
+		found_setup = TRUE;
 		if (!strcasecmp(value, "active")) {
 			dtls->set_setup(instance, AST_RTP_DTLS_SETUP_ACTIVE);
 		} else if (!strcasecmp(value, "passive")) {
@@ -11009,15 +11016,22 @@ static int process_sdp_a_dtls(const char *a, struct sip_pvt *p, struct ast_rtp_i
 			ast_log(LOG_WARNING, "Unsupported connection attribute value '%s' received on dialog '%s'\n",
 				value, p->callid);
 		}
-	} else if (sscanf(a, "fingerprint: %5s %255s", hash, value) == 2) {
+	} else if (sscanf(a, "fingerprint: %7s %255s", hash, value) == 2) {
 		found = TRUE;
 
 		if (!strcasecmp(hash, "sha-1")) {
 			dtls->set_fingerprint(instance, AST_RTP_DTLS_HASH_SHA1, value);
+		} else if (!strcasecmp(hash, "sha-256")) {
+			dtls->set_fingerprint(instance, AST_RTP_DTLS_HASH_SHA256, value);
 		} else {
 			ast_log(LOG_WARNING, "Unsupported fingerprint hash type '%s' received on dialog '%s'\n",
 				hash, p->callid);
 		}
+	}
+
+	if (found && !found_setup) {
+		/* No setup line provided by peer */
+		dtls->set_setup(instance, AST_RTP_DTLS_SETUP_PASSIVE);
 	}
 
 	return found;
@@ -12686,7 +12700,7 @@ static void start_ice(struct ast_rtp_instance *instance)
 }
 
 /*! \brief Add DTLS attributes to SDP */
-static void add_dtls_to_sdp(struct ast_rtp_instance *instance, struct ast_str **a_buf)
+static void add_dtls_to_sdp(struct ast_rtp_instance *instance, const struct sip_pvt *dialog, struct ast_str **a_buf)
 {
 	struct ast_rtp_engine_dtls *dtls;
 	const char *fingerprint;
@@ -12723,7 +12737,9 @@ static void add_dtls_to_sdp(struct ast_rtp_instance *instance, struct ast_str **
 		break;
 	}
 
-	if ((fingerprint = dtls->get_fingerprint(instance, AST_RTP_DTLS_HASH_SHA1))) {
+	if ((fingerprint = dtls->get_fingerprint(instance, &dialog->dtls_cfg, AST_RTP_DTLS_HASH_SHA256))) {
+		ast_str_append(a_buf, 0, "a=fingerprint:SHA-256 %s\r\n", fingerprint);
+	} else if ((fingerprint = dtls->get_fingerprint(instance, &dialog->dtls_cfg, AST_RTP_DTLS_HASH_SHA1))) {
 		ast_str_append(a_buf, 0, "a=fingerprint:SHA-1 %s\r\n", fingerprint);
 	}
 }
@@ -13056,7 +13072,9 @@ static char *get_sdp_rtp_profile(const struct sip_pvt *p, unsigned int secure, s
 	struct ast_rtp_engine_dtls *dtls;
 
 	if ((dtls = ast_rtp_instance_get_dtls(instance)) && dtls->active(instance)) {
-		return ast_test_flag(&p->flags[2], SIP_PAGE3_USE_AVPF) ? "UDP/TLS/RTP/SAVPF" : "UDP/TLS/RTP/SAVP";
+		/*SRTP_DTLS */
+		return ast_test_flag(&p->flags[2], SIP_PAGE3_USE_AVPF) ? "RTP/SAVPF" : "RTP/SAVP";
+		/*SRTP_DTLS */
 	} else {
 		if (ast_test_flag(&p->flags[2], SIP_PAGE3_USE_AVPF)) {
 			return secure ? "RTP/SAVPF" : "RTP/AVPF";
@@ -13240,7 +13258,7 @@ static enum sip_result add_sdp(struct sip_request *resp, struct sip_pvt *p, int 
 					add_ice_to_sdp(p->vrtp, &a_video);
 				}
 
-				add_dtls_to_sdp(p->vrtp, &a_video);
+				add_dtls_to_sdp(p->vrtp, p, &a_video);
 			}
 		}
 
@@ -13261,7 +13279,7 @@ static enum sip_result add_sdp(struct sip_request *resp, struct sip_pvt *p, int 
 					add_ice_to_sdp(p->trtp, &a_text);
 				}
 
-				add_dtls_to_sdp(p->trtp, &a_text);
+				add_dtls_to_sdp(p->trtp, p, &a_text);
 			}
 		}
 
@@ -13364,7 +13382,7 @@ static enum sip_result add_sdp(struct sip_request *resp, struct sip_pvt *p, int 
 				add_ice_to_sdp(p->rtp, &a_audio);
 			}
 
-			add_dtls_to_sdp(p->rtp, &a_audio);
+			add_dtls_to_sdp(p->rtp, p, &a_audio);
 		}
 	}
 
@@ -33145,8 +33163,6 @@ static int setup_srtp(struct sip_srtp **srtp)
 
 static int process_crypto(struct sip_pvt *p, struct ast_rtp_instance *rtp, struct sip_srtp **srtp, const char *a)
 {
-	struct ast_rtp_engine_dtls *dtls;
-
 	/* If no RTP instance exists for this media stream don't bother processing the crypto line */
 	if (!rtp) {
 		ast_debug(3, "Received offer with crypto line for media stream that is not enabled\n");
@@ -33176,11 +33192,6 @@ static int process_crypto(struct sip_pvt *p, struct ast_rtp_instance *rtp, struc
 	}
 
 	ast_set_flag(*srtp, SRTP_CRYPTO_OFFER_OK);
-
-	if ((dtls = ast_rtp_instance_get_dtls(rtp))) {
-		dtls->stop(rtp);
-		p->dtls_cfg.enabled = 0;
-	}
 
 	return TRUE;
 }

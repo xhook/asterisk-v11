@@ -825,6 +825,7 @@ static int regobjs = 0;       /*!< Registry objects */
 /* }@ */
 
 static struct ast_flags global_flags[3] = {{0}};  /*!< global SIP_ flags */
+static struct ast_rtp_dtls_cfg global_dtls_cfg = {0};  /*!< global DTLS flags */
 static int global_t38_maxdatagram;                /*!< global T.38 FaxMaxDatagram override */
 
 static struct ast_event_sub *network_change_event_subscription; /*!< subscription id for network change events */
@@ -30354,6 +30355,7 @@ static void set_peer_defaults(struct sip_peer *peer)
 	ast_copy_flags(&peer->flags[0], &global_flags[0], SIP_FLAGS_TO_COPY);
 	ast_copy_flags(&peer->flags[1], &global_flags[1], SIP_PAGE2_FLAGS_TO_COPY);
 	ast_copy_flags(&peer->flags[2], &global_flags[2], SIP_PAGE3_FLAGS_TO_COPY);
+	ast_rtp_dtls_cfg_copy(&global_dtls_cfg, &peer->dtls_cfg);
 	ast_string_field_set(peer, context, sip_cfg.default_context);
 	ast_string_field_set(peer, record_on_feature, sip_cfg.default_record_on_feature);
 	ast_string_field_set(peer, record_off_feature, sip_cfg.default_record_off_feature);
@@ -32080,6 +32082,8 @@ static int reload_config(enum channelreloadreason reason)
 			ast_copy_string(default_parkinglot, v->value, sizeof(default_parkinglot));
 		} else if (!strcasecmp(v->name, "refer_addheaders")) {
 			global_refer_addheaders = ast_true(v->value);
+		} else {
+			ast_rtp_dtls_cfg_parse(&global_dtls_cfg, v->name, v->value);
 		}
 	}
 
